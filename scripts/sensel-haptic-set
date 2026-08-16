@@ -1,0 +1,198 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+set -eu
+
+daemon=/usr/local/libexec/sensel-haptic-daemon
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "sensel-haptic-set must be run as root" >&2
+    exit 1
+fi
+
+mode=single
+if [ "$#" -eq 2 ] && [ "$1" = "--daemon" ]; then
+    mode=daemon
+    device=$2
+    usage=
+    value=
+elif [ "$#" -eq 2 ] && [ "$1" = "--get" ]; then
+    mode=get
+    device=$2
+    usage=
+    value=
+elif [ "$#" -eq 2 ] && [ "$1" = "--get-click-force" ]; then
+    mode=click-get
+    device=$2
+    usage=
+    value=
+elif [ "$#" -eq 3 ] && [ "$1" = "--set-click-force" ]; then
+    mode=click-set
+    device=$2
+    usage=
+    value=$3
+elif [ "$#" -eq 2 ] && [ "$1" = "--get-state" ]; then
+    mode=state-get
+    device=$2
+    usage=
+    value=
+elif [ "$#" -eq 2 ] && [ "$1" = "--get-trackpoint-click-force" ]; then
+    mode=trackpoint-get
+    device=$2
+    usage=
+    value=
+elif [ "$#" -eq 3 ] && [ "$1" = "--set-trackpoint-click-force" ]; then
+    mode=trackpoint-set
+    device=$2
+    usage=
+    value=$3
+elif [ "$#" -eq 2 ] && [ "$1" = "--get-trackpoint-buttons" ]; then
+    mode=buttons-get
+    device=$2
+    usage=
+    value=
+elif [ "$#" -eq 3 ] && [ "$1" = "--set-trackpoint-buttons" ]; then
+    mode=buttons-set
+    device=$2
+    usage=
+    value=$3
+elif [ "$#" -eq 2 ] && [ "$1" = "--get-intensity" ]; then
+    mode=intensity-get
+    device=$2
+    usage=
+    value=
+elif [ "$#" -eq 3 ] && [ "$1" = "--set-intensity" ]; then
+    mode=intensity-set
+    device=$2
+    usage=
+    value=$3
+elif [ "$#" -eq 3 ]; then
+    device=$1
+    usage=$2
+    value=$3
+else
+    echo "usage: sensel-haptic-set /dev/hidrawN b0000 VALUE (legacy)" >&2
+    echo "   or: sensel-haptic-set --daemon /dev/hidrawN" >&2
+    echo "   or: sensel-haptic-set --get /dev/hidrawN" >&2
+    echo "   or: sensel-haptic-set --get-click-force /dev/hidrawN" >&2
+    echo "   or: sensel-haptic-set --set-click-force /dev/hidrawN 2..510 (even Gf)" >&2
+    echo "   or: sensel-haptic-set --get-trackpoint-click-force /dev/hidrawN" >&2
+    echo "   or: sensel-haptic-set --set-trackpoint-click-force /dev/hidrawN 1..255" >&2
+    echo "   or: sensel-haptic-set --get-trackpoint-buttons /dev/hidrawN" >&2
+    echo "   or: sensel-haptic-set --set-trackpoint-buttons /dev/hidrawN 0|1" >&2
+    echo "   or: sensel-haptic-set --get-state /dev/hidrawN" >&2
+    echo "   or: sensel-haptic-set --get-intensity /dev/hidrawN" >&2
+    echo "   or: sensel-haptic-set --set-intensity /dev/hidrawN 0..100" >&2
+    exit 2
+fi
+
+device_name=${device#/dev/}
+device_number=${device_name#hidraw}
+case "$device_name" in
+    hidraw[0-9]*) ;;
+    *) echo "refusing an unexpected HID path: $device" >&2; exit 2 ;;
+esac
+case "$device_number" in
+    ''|*[!0-9]*) echo "refusing an unexpected HID path: $device" >&2; exit 2 ;;
+esac
+[ -c "$device" ] || { echo "HID device does not exist: $device" >&2; exit 1; }
+
+sysfs_device="/sys/class/hidraw/$device_name"
+resolved_device=$(readlink -f "$sysfs_device" 2>/dev/null || true)
+case "$resolved_device" in
+    *SNSL*|*2C2F:0028*) ;;
+    *) echo "refusing a non-Sensel HID device: $device" >&2; exit 2 ;;
+esac
+
+if [ "$mode" = daemon ]; then
+    [ -x "$daemon" ] || { echo "Sensel HID daemon was not installed" >&2; exit 1; }
+    exec "$daemon" "$device"
+fi
+
+if [ "$mode" = get ]; then
+    [ -x "$daemon" ] || { echo "Sensel HID daemon was not installed" >&2; exit 1; }
+    exec "$daemon" --read "$device"
+fi
+
+if [ "$mode" = click-get ]; then
+    [ -x "$daemon" ] || { echo "Sensel HID daemon was not installed" >&2; exit 1; }
+    exec "$daemon" --read-click-force "$device"
+fi
+
+if [ "$mode" = click-set ]; then
+    case "$value" in ''|*[!0-9]*) echo "click force must be an even value from 2 to 510 Gf" >&2; exit 2 ;; esac
+    if [ "$value" -lt 2 ] || [ "$value" -gt 510 ] || [ $((value % 2)) -ne 0 ]; then
+        echo "click force must be an even value from 2 to 510 Gf" >&2
+        exit 2
+    fi
+    [ -x "$daemon" ] || { echo "Sensel HID daemon was not installed" >&2; exit 1; }
+    exec "$daemon" --write-click-force "$device" "$value"
+fi
+
+if [ "$mode" = state-get ]; then
+    [ -x "$daemon" ] || { echo "Sensel HID daemon was not installed" >&2; exit 1; }
+    exec "$daemon" --read-state "$device"
+fi
+
+if [ "$mode" = trackpoint-get ]; then
+    [ -x "$daemon" ] || { echo "Sensel HID daemon was not installed" >&2; exit 1; }
+    exec "$daemon" --read-trackpoint-force "$device"
+fi
+
+if [ "$mode" = trackpoint-set ]; then
+    case "$value" in ''|*[!0-9]*) echo "TrackPoint click force must be a value from 1 to 255" >&2; exit 2 ;; esac
+    if [ "$value" -lt 1 ] || [ "$value" -gt 255 ]; then
+        echo "TrackPoint click force must be a value from 1 to 255" >&2
+        exit 2
+    fi
+    [ -x "$daemon" ] || { echo "Sensel HID daemon was not installed" >&2; exit 1; }
+    exec "$daemon" --write-trackpoint-force "$device" "$value"
+fi
+
+if [ "$mode" = buttons-get ]; then
+    [ -x "$daemon" ] || { echo "Sensel HID daemon was not installed" >&2; exit 1; }
+    exec "$daemon" --read-trackpoint-buttons "$device"
+fi
+
+if [ "$mode" = buttons-set ]; then
+    case "$value" in
+        0|1) ;;
+        *) echo "TrackPoint button mode must be 0 or 1" >&2; exit 2 ;;
+    esac
+    [ -x "$daemon" ] || { echo "Sensel HID daemon was not installed" >&2; exit 1; }
+    exec "$daemon" --write-trackpoint-buttons "$device" "$value"
+fi
+
+if [ "$mode" = intensity-get ]; then
+    [ -x "$daemon" ] || { echo "Sensel HID daemon was not installed" >&2; exit 1; }
+    exec "$daemon" --read-intensity "$device"
+fi
+
+if [ "$mode" = intensity-set ]; then
+    case "$value" in
+        ''|*[!0-9]*) echo "intensity must be an integer from 0 to 100" >&2; exit 2 ;;
+    esac
+    if [ "$value" -gt 100 ]; then
+        echo "intensity must be an integer from 0 to 100" >&2
+        exit 2
+    fi
+    [ -x "$daemon" ] || { echo "Sensel HID daemon was not installed" >&2; exit 1; }
+    exec "$daemon" --write-intensity "$device" "$value"
+fi
+
+case "$usage" in
+    b0000) ;;
+    *) echo "this helper only exposes the Sensel haptic-intensity setting" >&2; exit 2 ;;
+esac
+
+case "$value" in
+    ''|*[!0-9]*) echo "intensity must be an integer from 0 to 100" >&2; exit 2 ;;
+esac
+
+if [ "$value" -gt 100 ]; then
+    echo "intensity must be an integer from 0 to 100" >&2
+    exit 2
+fi
+
+[ -x "$daemon" ] || { echo "Sensel HID daemon was not installed" >&2; exit 1; }
+exec "$daemon" --write-intensity "$device" "$value"

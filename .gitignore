@@ -1,0 +1,47 @@
+# Local source trees, build directories and generated artifacts.
+/source/
+/artifacts/
+/build/
+**/build*/
+**/meson-private/
+**/meson-logs/
+**/meson-info/
+**/.ninja_deps
+**/.ninja_log
+**/compile_commands.json
+
+# Generated packages and translation catalogs.
+*.tar
+*.tar.xz
+*.tar.gz
+*.rpm
+*.deb
+*.mo
+*.pot
+
+# Python caches and test output.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Temporary files.
+*.log
+*.orig
+*.rej
+*.swp
+*.swo
+
+# Local configuration and tooling.
+.env
+.env.*
+.cache/
+.venv/
+venv/
+.direnv/
+.vscode/
+.idea/
+
+# Operating-system metadata.
+.DS_Store
+Thumbs.db

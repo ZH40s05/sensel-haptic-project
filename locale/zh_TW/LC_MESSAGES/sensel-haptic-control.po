@@ -1,0 +1,161 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: sensel-haptic-control\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-16 18:57+0800\n"
+"PO-Revision-Date: 2026-08-16 19:00+0800\n"
+"Last-Translator: Sensel Haptic Touchpad Project\n"
+"Language-Team: Traditional Chinese\n"
+"Language: zh_TW\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#: tools/sensel_haptic_gui.py
+msgid "Privileged helper returned incomplete Sensel state"
+msgstr "特權 helper 傳回的 Sensel 狀態不完整"
+
+#: tools/sensel_haptic_gui.py
+msgid "Privileged helper returned an invalid haptic intensity"
+msgstr "特權 helper 傳回了無效的觸覺強度"
+
+#: tools/sensel_haptic_gui.py
+msgid "Privileged helper returned an invalid TrackPoint button state"
+msgstr "特權 helper 傳回了無效的 TrackPoint 按鈕狀態"
+
+#, python-brace-format
+#: tools/sensel_haptic_gui.py
+msgid "Privileged helper not found: {path}"
+msgstr "找不到特權 helper：{path}"
+
+#: tools/sensel_haptic_gui.py
+msgid "pkexec was not found; cannot access the Sensel device"
+msgstr "找不到 pkexec，無法存取 Sensel 裝置"
+
+#, python-brace-format
+#: tools/sensel_haptic_gui.py
+msgid "Helper exited with status {status}"
+msgstr "helper 以狀態 {status} 結束"
+
+#: tools/sensel_haptic_gui.py
+msgid "Sensel Haptic Touchpad"
+msgstr "Sensel 觸覺觸控板"
+
+#: tools/sensel_haptic_gui.py
+msgid "Looking for a Sensel Haptic Touchpad…"
+msgstr "正在尋找 Sensel 觸覺觸控板…"
+
+#: tools/sensel_haptic_gui.py
+msgid "Touchpad Settings"
+msgstr "觸控板設定"
+
+#: tools/sensel_haptic_gui.py
+msgid "Device"
+msgstr "裝置"
+
+#: tools/sensel_haptic_gui.py
+msgid "HID device:"
+msgstr "HID 裝置："
+
+#: tools/sensel_haptic_gui.py
+msgid "Refresh"
+msgstr "重新整理"
+
+#: tools/sensel_haptic_gui.py
+msgid "Haptic Feedback"
+msgstr "觸覺回饋"
+
+#: tools/sensel_haptic_gui.py
+msgid "Haptics Intensity"
+msgstr "觸覺強度"
+
+#: tools/sensel_haptic_gui.py
+msgid "Click Force"
+msgstr "點擊力度"
+
+#: tools/sensel_haptic_gui.py
+msgid "Fine adjustment: 1–255 main click register units. Windows presets: 60 / 82 / 95 (120 / 164 / 190 Gf)."
+msgstr "精細調整：1–255 主點擊暫存器單位。Windows 預設：60 / 82 / 95（120 / 164 / 190 Gf）。"
+
+#: tools/sensel_haptic_gui.py
+msgid "Apply"
+msgstr "套用"
+
+#: tools/sensel_haptic_gui.py
+msgid "TrackPoint Buttons"
+msgstr "TrackPoint 按鈕"
+
+#: tools/sensel_haptic_gui.py
+msgid "Enable TrackPoint Buttons"
+msgstr "啟用 TrackPoint 按鈕"
+
+#: tools/sensel_haptic_gui.py
+msgid "TrackPoint Click Force"
+msgstr "TrackPoint 點擊力度"
+
+#: tools/sensel_haptic_gui.py
+msgid "Fine adjustment: 1–255 Windows 3HB register units. Windows presets: 28 / 38 / 60."
+msgstr "精細調整：1–255 個 Windows 3HB 暫存器單位。Windows 預設：28 / 38 / 60。"
+
+#: tools/sensel_haptic_gui.py
+msgid "Sensel Haptic Touchpad was not detected. Check the connection and click Refresh."
+msgstr "未偵測到 Sensel 觸覺觸控板。請檢查裝置連線，然後點選「重新整理」。"
+
+#: tools/sensel_haptic_gui.py
+msgid "Reading settings from the device…"
+msgstr "正在從裝置讀取設定…"
+
+#, python-brace-format
+#: tools/sensel_haptic_gui.py
+msgid "Failed to read device settings: {error}"
+msgstr "讀取裝置設定失敗：{error}"
+
+#, python-brace-format
+#: tools/sensel_haptic_gui.py
+msgid "The device returned invalid data: {error}"
+msgstr "裝置傳回的資料無效：{error}"
+
+#: tools/sensel_haptic_gui.py
+msgid "Settings read from the device. Changes to sliders and switches are saved to the device."
+msgstr "已從裝置讀取設定。滑桿和開關的變更會儲存至裝置。"
+
+#, python-brace-format
+#: tools/sensel_haptic_gui.py
+msgid "Applying {label}…"
+msgstr "正在套用 {label}…"
+
+#, python-brace-format
+#: tools/sensel_haptic_gui.py
+msgid "{label} failed: {error}"
+msgstr "{label}失敗：{error}"
+
+#, python-brace-format
+#: tools/sensel_haptic_gui.py
+msgid "{label} failed"
+msgstr "{label}失敗"
+
+#, python-brace-format
+#: tools/sensel_haptic_gui.py
+msgid "{label} applied and saved."
+msgstr "{label}已套用並儲存。"
+
+#: tools/sensel_haptic_gui.py
+msgid "Invalid Click Force"
+msgstr "無效的點擊力度"
+
+#: tools/sensel_haptic_gui.py
+msgid "Enter a value from 1 to 255."
+msgstr "請輸入 1 到 255 之間的數值。"
+
+#: tools/sensel_haptic_gui.py
+msgid "Click Force must be a value from 1 to 255."
+msgstr "點擊力度必須是 1 到 255 之間的數值。"
+
+#: tools/sensel_haptic_gui.py
+msgid "Invalid TrackPoint Click Force"
+msgstr "無效的 TrackPoint 點擊力度"
+
+#: tools/sensel_haptic_gui.py
+msgid "TrackPoint Click Force must be a value from 1 to 255."
+msgstr "TrackPoint 點擊力度必須是 1 到 255 之間的數值。"

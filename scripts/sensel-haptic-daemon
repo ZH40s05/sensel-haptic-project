@@ -1,0 +1,477 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+import os
+import fcntl
+import re
+import select
+import stat
+import struct
+import sys
+import time
+
+DEVICE_RE = re.compile(r"^/dev/hidraw[0-9]+$")
+
+PIPE_REPORT_ID = 0x09
+PIPE_REPORT_SIZE = 21
+PIPE_PAYLOAD_SIZE = PIPE_REPORT_SIZE - 2
+READ_ACK = 0x01
+WRITE_ACK = 0x05
+SAVE_REGISTER = 0x0230
+USER_SETTING_ATTRIBUTE = 0x4000
+CLICK_DOWN_REGISTER = 0x0038
+CLICK_UP_REGISTER = 0x0090
+THREE_HB_LEFT_DOWN_REGISTER = 0x0091
+THREE_HB_LEFT_UP_REGISTER = 0x0092
+THREE_HB_RIGHT_DOWN_REGISTER = 0x0093
+THREE_HB_RIGHT_UP_REGISTER = 0x0094
+THREE_HB_MIDDLE_DOWN_REGISTER = 0x0095
+THREE_HB_MIDDLE_UP_REGISTER = 0x0096
+PTP_BUTTONS_CONFIG_REGISTER = 0x008A
+HAPTIC_INTENSITY_REGISTER = 0x00AB
+REGISTER_LOCK_FILE = "/run/lock/sensel-haptic-touchpad.lock"
+CLICK_FORCE_LEVELS = (120, 164, 190)
+CLICK_FORCE_MIN = 2
+CLICK_FORCE_MAX = 510
+THREE_HB_FORCE_MIN = 1
+THREE_HB_FORCE_MAX = 255
+# Windows writes the TrackPoint combo values directly to the three 3HB down
+# registers. These are the firmware's Gf/2 register units, not physical Gf
+# values to divide a second time.
+THREE_HB_FORCE_LEVELS = (28, 38, 60)
+RELEASE_FORCE_RATIO = 0.65
+
+
+def validate_device(path):
+    if not DEVICE_RE.fullmatch(path):
+        raise ValueError("unexpected HID path")
+
+    name = os.path.basename(path)
+    if not stat.S_ISCHR(os.stat(path).st_mode):
+        raise ValueError("HID path is not a character device")
+
+    resolved = os.path.realpath(f"/sys/class/hidraw/{name}")
+    if "SNSL" not in resolved and "2C2F:0028" not in resolved:
+        raise ValueError("device is not a Sensel haptic touchpad")
+
+
+class SenselPipe:
+    """Small root-owned implementation of SenselSerialDevice's raw pipe."""
+
+    def __init__(self, path, timeout=2.0, hold_lock=True):
+        validate_device(path)
+        self.lock_file = open(REGISTER_LOCK_FILE, "a+")
+        self.lock_held = False
+        try:
+            self.fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        except Exception:
+            self.lock_file.close()
+            raise
+        self.timeout = timeout
+        self.rx_buffer = bytearray()
+        if hold_lock:
+            self.acquire_lock()
+
+    def acquire_lock(self):
+        if not self.lock_held:
+            fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_EX)
+            self.lock_held = True
+
+    def release_lock(self):
+        if self.lock_held:
+            fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_UN)
+            self.lock_held = False
+
+    def close(self):
+        if getattr(self, "fd", None) is not None:
+            os.close(self.fd)
+            self.fd = None
+        self.release_lock()
+        self.lock_file.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        self.close()
+
+    def _drain(self):
+        while True:
+            ready, _, _ = select.select([self.fd], [], [], 0)
+            if not ready:
+                return
+            try:
+                os.read(self.fd, 1024)
+            except BlockingIOError:
+                return
+
+    def _send_payload(self, payload):
+        if not payload:
+            raise ValueError("empty Sensel pipe payload")
+
+        for start in range(0, len(payload), PIPE_PAYLOAD_SIZE):
+            chunk = payload[start : start + PIPE_PAYLOAD_SIZE]
+            report = bytearray(PIPE_REPORT_SIZE)
+            report[0] = PIPE_REPORT_ID
+            report[1] = len(chunk)
+            report[2 : 2 + len(chunk)] = chunk
+            written = os.write(self.fd, report)
+            if written != PIPE_REPORT_SIZE:
+                raise OSError(
+                    f"short Sensel HID report write: {written}/{PIPE_REPORT_SIZE}"
+                )
+
+    def _receive_report_payload(self):
+        deadline = time.monotonic() + self.timeout
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select(
+                [self.fd], [], [], max(0.0, deadline - time.monotonic())
+            )
+            if not ready:
+                break
+            try:
+                report = os.read(self.fd, 1024)
+            except BlockingIOError:
+                continue
+            if len(report) < 2 or report[0] != PIPE_REPORT_ID:
+                continue
+            count = report[1]
+            if count > PIPE_PAYLOAD_SIZE or len(report) < 2 + count:
+                continue
+            return report[2 : 2 + count]
+        raise TimeoutError("timed out waiting for Sensel pipe response")
+
+    def _receive(self, count):
+        while len(self.rx_buffer) < count:
+            self.rx_buffer.extend(self._receive_report_payload())
+        result = bytes(self.rx_buffer[:count])
+        del self.rx_buffer[:count]
+        return result
+
+    @staticmethod
+    def _command(is_read, address, size):
+        if not 0 <= address <= 0x3FFF:
+            raise ValueError("register address must be between 0 and 0x3fff")
+        if not 0 <= size <= 0xFF:
+            raise ValueError("register command size must fit in one byte")
+        first = ((address & 0x3F00) >> 7) | 0x01
+        if is_read:
+            first |= 0x80
+        return bytes((first, address & 0xFF, size))
+
+    def read_register(self, address, size):
+        if not 1 <= size <= 0xFF:
+            raise ValueError("read size must be between 1 and 255")
+        self._drain()
+        self.rx_buffer.clear()
+        self._send_payload(self._command(True, address, size))
+        if self._receive(1)[0] != READ_ACK:
+            raise RuntimeError("device rejected register read")
+        self._receive(1)  # response status, not used by SenselSerialDevice
+        reported_size = struct.unpack("<H", self._receive(2))[0]
+        if reported_size != size:
+            raise RuntimeError(
+                f"read size mismatch: requested {size}, got {reported_size}"
+            )
+        data = self._receive(size)
+        checksum = self._receive(1)[0]
+        if (sum(data) & 0xFF) != checksum:
+            raise RuntimeError("register read checksum mismatch")
+        return data
+
+    def write_register(self, address, data, persist=False):
+        if not 1 <= len(data) <= 0xFF:
+            raise ValueError("write size must be between 1 and 255")
+        self._drain()
+        packet = self._command(False, address, len(data))
+        packet += data + bytes((sum(data) & 0xFF,))
+        self._send_payload(packet)
+        if self._receive(1)[0] != WRITE_ACK:
+            raise RuntimeError("device rejected register write")
+        self._receive(1)  # response status, not used by SenselSerialDevice
+        if persist:
+            self.save_register(address)
+
+    def save_register(self, address):
+        record = struct.pack("<HHB", address, USER_SETTING_ATTRIBUTE, 0x51)
+        self.write_register(SAVE_REGISTER, record, persist=False)
+
+    def read_main_click_force(self):
+        down = self.read_register(CLICK_DOWN_REGISTER, 1)[0]
+        self.read_register(CLICK_UP_REGISTER, 1)
+        return down * 2
+
+    def set_main_click_force(self, gf):
+        if (
+            gf < CLICK_FORCE_MIN
+            or gf > CLICK_FORCE_MAX
+            or gf % 2 != 0
+        ):
+            raise ValueError("click force must be an even value from 2 to 510 Gf")
+        down = gf // 2
+        up = int(round(down * RELEASE_FORCE_RATIO))
+        self.write_register(CLICK_DOWN_REGISTER, bytes((down,)), persist=True)
+        self.write_register(CLICK_UP_REGISTER, bytes((up,)), persist=True)
+        if self.read_register(CLICK_DOWN_REGISTER, 1)[0] != down:
+            raise RuntimeError("main click-down force readback mismatch")
+        if self.read_register(CLICK_UP_REGISTER, 1)[0] != up:
+            raise RuntimeError("main click-up force readback mismatch")
+        return down, up
+
+    def read_haptic_intensity(self):
+        return self.read_register(HAPTIC_INTENSITY_REGISTER, 1)[0]
+
+    def set_haptic_intensity(self, intensity):
+        if not 0 <= intensity <= 100:
+            raise ValueError("haptic intensity must be between 0 and 100")
+        self.write_register(
+            HAPTIC_INTENSITY_REGISTER,
+            bytes((intensity,)),
+            persist=True,
+        )
+        return intensity
+
+    def read_trackpoint_click_force(self):
+        values = tuple(
+            self.read_register(address, 1)[0]
+            for address in (
+                THREE_HB_LEFT_DOWN_REGISTER,
+                THREE_HB_RIGHT_DOWN_REGISTER,
+                THREE_HB_MIDDLE_DOWN_REGISTER,
+            )
+        )
+        if len(set(values)) != 1:
+            raise RuntimeError("TrackPoint down-force registers do not match")
+        return values[0]
+
+    def set_trackpoint_click_force(self, gf):
+        if gf < THREE_HB_FORCE_MIN or gf > THREE_HB_FORCE_MAX:
+            raise ValueError(
+                "TrackPoint click force must be a value from 1 to 255 "
+                "(Windows TrackPoint register units)"
+            )
+        down = gf
+        up = int(round(down * RELEASE_FORCE_RATIO))
+        for address in (
+            THREE_HB_LEFT_DOWN_REGISTER,
+            THREE_HB_RIGHT_DOWN_REGISTER,
+            THREE_HB_MIDDLE_DOWN_REGISTER,
+        ):
+            self.write_register(address, bytes((down,)), persist=True)
+        for address in (
+            THREE_HB_LEFT_UP_REGISTER,
+            THREE_HB_RIGHT_UP_REGISTER,
+            THREE_HB_MIDDLE_UP_REGISTER,
+        ):
+            self.write_register(address, bytes((up,)), persist=True)
+        for address in (
+            THREE_HB_LEFT_DOWN_REGISTER,
+            THREE_HB_RIGHT_DOWN_REGISTER,
+            THREE_HB_MIDDLE_DOWN_REGISTER,
+        ):
+            if self.read_register(address, 1)[0] != down:
+                raise RuntimeError(
+                    f"TrackPoint click-down force readback mismatch at 0x{address:04x}"
+                )
+        for address in (
+            THREE_HB_LEFT_UP_REGISTER,
+            THREE_HB_RIGHT_UP_REGISTER,
+            THREE_HB_MIDDLE_UP_REGISTER,
+        ):
+            if self.read_register(address, 1)[0] != up:
+                raise RuntimeError(
+                    f"TrackPoint click-up force readback mismatch at 0x{address:04x}"
+                )
+        return down, up
+
+    def read_trackpoint_buttons(self):
+        return self.read_register(PTP_BUTTONS_CONFIG_REGISTER, 1)[0]
+
+    def set_trackpoint_buttons(self, enabled):
+        if enabled not in (0, 1):
+            raise ValueError("TrackPoint button mode must be 0 or 1")
+        self.write_register(
+            PTP_BUTTONS_CONFIG_REGISTER,
+            bytes((enabled,)),
+            persist=True,
+        )
+        return enabled
+
+    def print_state(self):
+        print(f"haptic-intensity={self.read_haptic_intensity()}", flush=True)
+        print(f"click-force={self.read_main_click_force()}", flush=True)
+        print(
+            f"trackpoint-click-force={self.read_trackpoint_click_force()}",
+            flush=True,
+        )
+        print(
+            f"trackpoint-buttons={int(bool(self.read_trackpoint_buttons()))}",
+            flush=True,
+        )
+
+
+def main():
+    if os.geteuid() != 0:
+        print("sensel-haptic-daemon must be run as root", file=sys.stderr)
+        return 1
+
+    if len(sys.argv) == 2:
+        mode = "daemon"
+        device_path = sys.argv[1]
+    elif len(sys.argv) == 3 and sys.argv[1] == "--read":
+        mode = "read"
+        device_path = sys.argv[2]
+    elif len(sys.argv) == 3 and sys.argv[1] == "--read-state":
+        mode = "read-state"
+        device_path = sys.argv[2]
+    elif len(sys.argv) == 3 and sys.argv[1] == "--read-intensity":
+        mode = "read-intensity"
+        device_path = sys.argv[2]
+    elif len(sys.argv) == 3 and sys.argv[1] == "--read-click-force":
+        mode = "read-click-force"
+        device_path = sys.argv[2]
+    elif len(sys.argv) == 3 and sys.argv[1] == "--read-trackpoint-force":
+        mode = "read-trackpoint-force"
+        device_path = sys.argv[2]
+    elif len(sys.argv) == 3 and sys.argv[1] == "--read-trackpoint-buttons":
+        mode = "read-trackpoint-buttons"
+        device_path = sys.argv[2]
+    elif len(sys.argv) == 4 and sys.argv[1] == "--write-intensity":
+        mode = "write-intensity"
+        device_path = sys.argv[2]
+        try:
+            intensity = int(sys.argv[3], 10)
+        except ValueError:
+            print("haptic intensity must be an integer from 0 to 100", file=sys.stderr)
+            return 2
+    elif len(sys.argv) == 4 and sys.argv[1] == "--write-click-force":
+        mode = "write-click-force"
+        device_path = sys.argv[2]
+        try:
+            click_force = int(sys.argv[3], 10)
+        except ValueError:
+            print("click force must be an even value from 2 to 510 Gf", file=sys.stderr)
+            return 2
+        if click_force < CLICK_FORCE_MIN or click_force > CLICK_FORCE_MAX or click_force % 2:
+            print("click force must be an even value from 2 to 510 Gf", file=sys.stderr)
+            return 2
+    elif len(sys.argv) == 4 and sys.argv[1] == "--write-trackpoint-force":
+        mode = "write-trackpoint-force"
+        device_path = sys.argv[2]
+        try:
+            trackpoint_force = int(sys.argv[3], 10)
+        except ValueError:
+            print(
+                "TrackPoint click force must be a value from 1 to 255 "
+                "(Windows TrackPoint register units)",
+                file=sys.stderr,
+            )
+            return 2
+        if trackpoint_force < THREE_HB_FORCE_MIN or trackpoint_force > THREE_HB_FORCE_MAX:
+            print(
+                "TrackPoint click force must be a value from 1 to 255 "
+                "(Windows TrackPoint register units)",
+                file=sys.stderr,
+            )
+            return 2
+    elif len(sys.argv) == 4 and sys.argv[1] == "--write-trackpoint-buttons":
+        mode = "write-trackpoint-buttons"
+        device_path = sys.argv[2]
+        try:
+            trackpoint_buttons = int(sys.argv[3], 10)
+        except ValueError:
+            print("TrackPoint button mode must be 0 or 1", file=sys.stderr)
+            return 2
+    else:
+        print("usage: sensel-haptic-daemon /dev/hidrawN", file=sys.stderr)
+        print("   or: sensel-haptic-daemon --read /dev/hidrawN", file=sys.stderr)
+        print("   or: sensel-haptic-daemon --read-state /dev/hidrawN", file=sys.stderr)
+        print("   or: sensel-haptic-daemon --read-intensity /dev/hidrawN", file=sys.stderr)
+        print("   or: sensel-haptic-daemon --write-intensity /dev/hidrawN 0..100", file=sys.stderr)
+        print(
+            "   or: sensel-haptic-daemon --read-click-force /dev/hidrawN",
+            file=sys.stderr,
+        )
+        print(
+            "   or: sensel-haptic-daemon --write-click-force /dev/hidrawN 2..510 (even Gf)",
+            file=sys.stderr,
+        )
+        print("   or: sensel-haptic-daemon --read-trackpoint-force /dev/hidrawN", file=sys.stderr)
+        print("   or: sensel-haptic-daemon --write-trackpoint-force /dev/hidrawN 1..255", file=sys.stderr)
+        print("   or: sensel-haptic-daemon --read-trackpoint-buttons /dev/hidrawN", file=sys.stderr)
+        print("   or: sensel-haptic-daemon --write-trackpoint-buttons /dev/hidrawN 0|1", file=sys.stderr)
+        return 2
+
+    try:
+        validate_device(device_path)
+
+        if mode == "read-state":
+            with SenselPipe(device_path) as pipe:
+                pipe.print_state()
+            return 0
+
+        if mode in ("read", "read-intensity"):
+            with SenselPipe(device_path) as pipe:
+                print(pipe.read_haptic_intensity(), flush=True)
+            return 0
+
+        if mode == "write-intensity":
+            with SenselPipe(device_path) as pipe:
+                print(pipe.set_haptic_intensity(intensity), flush=True)
+            return 0
+
+        if mode == "read-click-force":
+            with SenselPipe(device_path) as pipe:
+                print(pipe.read_main_click_force(), flush=True)
+            return 0
+
+        if mode == "write-click-force":
+            with SenselPipe(device_path) as pipe:
+                down, up = pipe.set_main_click_force(click_force)
+                print(f"click-down={down}, click-up={up}", flush=True)
+            return 0
+
+        if mode == "read-trackpoint-force":
+            with SenselPipe(device_path) as pipe:
+                print(pipe.read_trackpoint_click_force(), flush=True)
+            return 0
+
+        if mode == "write-trackpoint-force":
+            with SenselPipe(device_path) as pipe:
+                down, up = pipe.set_trackpoint_click_force(trackpoint_force)
+                print(f"trackpoint-click-down={down}, trackpoint-click-up={up}", flush=True)
+            return 0
+
+        if mode == "read-trackpoint-buttons":
+            with SenselPipe(device_path) as pipe:
+                print(int(bool(pipe.read_trackpoint_buttons())), flush=True)
+            return 0
+
+        if mode == "write-trackpoint-buttons":
+            with SenselPipe(device_path) as pipe:
+                print(pipe.set_trackpoint_buttons(trackpoint_buttons), flush=True)
+            return 0
+
+        with SenselPipe(device_path, hold_lock=False) as pipe:
+            for line in sys.stdin:
+                token = line.strip()
+                if not token:
+                    continue
+                try:
+                    pipe.acquire_lock()
+                    try:
+                        pipe.set_haptic_intensity(int(token, 10))
+                    finally:
+                        pipe.release_lock()
+                except Exception as error:
+                    print(f"Sensel HID write failed: {error}", file=sys.stderr, flush=True)
+                    return 1
+    except Exception as error:
+        print(f"Sensel HID daemon failed: {error}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

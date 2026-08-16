@@ -1,0 +1,1907 @@
+--- a/panels/mouse/cc-mouse-panel.c
++++ b/panels/mouse/cc-mouse-panel.c
+@@ -21,9 +21,18 @@
+  *
+  */
+ 
++#include "config.h"
++
+ #include <gdesktop-enums.h>
++#include <gio/gio.h>
++#include <glib/gi18n.h>
+ #include <gtk/gtk.h>
+ 
++#include <math.h>
++#include <limits.h>
++#include <stdlib.h>
++#include <string.h>
++
+ #include "cc-illustrated-row.h"
+ #include "cc-split-row.h"
+ #include "cc-list-row-info-button.h"
+@@ -34,6 +43,21 @@
+ #include "gsd-device-manager.h"
+ #include "gsd-input-helper.h"
+ 
++#define SENSEL_HAPTIC_HELPER "/usr/local/libexec/sensel-haptic-set"
++
++/* The Sensel firmware stores haptics intensity as a byte, but the original
++ * control-panel implementation exposed ten perceptual levels. Keep the
++ * switch as the off state and map levels 1..10 to the original non-linear
++ * byte values. */
++static const guint sensel_haptic_intensity_levels[] =
++{
++  32, 45, 55, 63, 71, 77, 84, 89, 95, 100,
++};
++
++#define SENSEL_HAPTIC_LEVEL_MIN 1
++#define SENSEL_HAPTIC_LEVEL_MAX G_N_ELEMENTS (sensel_haptic_intensity_levels)
++#define SENSEL_HAPTIC_DEFAULT_LEVEL 5
++
+ struct _CcMousePanel
+ {
+   CcPanel            parent_instance;
+@@ -55,6 +79,38 @@
+   GtkScale          *touchpad_speed_scale;
+   AdwSwitchRow      *touchpad_toggle_row;
+   AdwSwitchRow      *touchpad_typing_row;
++  AdwPreferencesGroup *sensel_group;
++  AdwActionRow      *sensel_status_row;
++  AdwSwitchRow      *sensel_haptic_feedback_row;
++  AdwActionRow      *sensel_intensity_row;
++  AdwActionRow      *sensel_click_force_row;
++  AdwSwitchRow      *sensel_trackpoint_buttons_row;
++  AdwActionRow      *sensel_trackpoint_force_row;
++  GtkScale          *sensel_intensity_scale;
++  GtkScale          *sensel_click_force_scale;
++  GtkScale          *sensel_trackpoint_force_scale;
++  gchar             *sensel_hidraw;
++  GSubprocess       *sensel_state_read_process;
++  GSubprocess       *sensel_read_process;
++  GSubprocess       *sensel_click_read_process;
++  GSubprocess       *sensel_process;
++  GSubprocess       *sensel_click_write_process;
++  GSubprocess       *sensel_trackpoint_buttons_write_process;
++  GSubprocess       *sensel_trackpoint_force_write_process;
++  guint              sensel_pending_intensity;
++  guint              sensel_pending_click_force;
++  guint              sensel_pending_trackpoint_force;
++  guint              sensel_saved_intensity;
++  gboolean           sensel_have_saved_intensity;
++  gboolean           sensel_state_synced;
++  gboolean           sensel_value_synced;
++  gboolean           sensel_click_force_synced;
++  gboolean           sensel_trackpoint_force_synced;
++  gboolean           sensel_syncing_scale;
++  gboolean           sensel_syncing_click_force;
++  gboolean           sensel_syncing_haptic_feedback;
++  gboolean           sensel_syncing_trackpoint_buttons;
++  gboolean           sensel_syncing_trackpoint_force;
+ 
+   GtkSwitch         *pointingstick_accel_switch;
+   AdwViewStackPage  *pointingstick_stack_page;
+@@ -102,6 +158,1066 @@
+ 
+ }
+ 
++static gchar *
++find_sensel_hidraw (void)
++{
++  GDir *dir;
++  const char *name;
++
++  dir = g_dir_open ("/sys/class/hidraw", 0, NULL);
++  if (!dir)
++    return NULL;
++
++  while ((name = g_dir_read_name (dir)))
++    {
++      char sysfs_path[PATH_MAX];
++      char resolved_path[PATH_MAX];
++
++      if (!g_str_has_prefix (name, "hidraw"))
++        continue;
++
++      g_snprintf (sysfs_path, sizeof sysfs_path,
++                  "/sys/class/hidraw/%s", name);
++
++      if (!realpath (sysfs_path, resolved_path))
++        continue;
++
++      /* SNSL0028 is the Sensel device exposed by the ThinkPad haptic
++       * touchpads. Keep the product-id check as a fallback because the
++       * kernel path is more stable than the hidraw number. */
++      if (!strstr (resolved_path, "SNSL") &&
++          !strstr (resolved_path, "2C2F:0028"))
++        continue;
++
++      g_dir_close (dir);
++      return g_strdup_printf ("/dev/%s", name);
++    }
++
++  g_dir_close (dir);
++  return NULL;
++}
++
++static void sensel_stop_daemon (CcMousePanel *self);
++static void sensel_stop_state_read (CcMousePanel *self);
++static void sensel_stop_read (CcMousePanel *self);
++static void sensel_stop_click_read (CcMousePanel *self);
++static void sensel_stop_click_write (CcMousePanel *self);
++static void sensel_stop_trackpoint_write (CcMousePanel *self);
++static void sensel_read_current_state (CcMousePanel *self);
++static void sensel_send_click_force (CcMousePanel *self,
++                                     guint         force);
++static void sensel_send_trackpoint_force (CcMousePanel *self,
++                                          guint         force);
++
++static void
++update_sensel_ui (CcMousePanel *self)
++{
++  g_autofree gchar *hidraw = find_sensel_hidraw ();
++  gboolean device_changed;
++
++  device_changed = g_strcmp0 (self->sensel_hidraw, hidraw) != 0;
++
++  if (device_changed)
++    {
++      sensel_stop_daemon (self);
++      sensel_stop_state_read (self);
++      sensel_stop_read (self);
++      sensel_stop_click_read (self);
++      sensel_stop_click_write (self);
++      sensel_stop_trackpoint_write (self);
++      self->sensel_state_synced = FALSE;
++      self->sensel_value_synced = FALSE;
++      self->sensel_click_force_synced = FALSE;
++      self->sensel_trackpoint_force_synced = FALSE;
++    }
++
++  g_clear_pointer (&self->sensel_hidraw, g_free);
++  self->sensel_hidraw = g_steal_pointer (&hidraw);
++
++  /* Keep the group available whenever a touchpad exists. Both states are
++   * direct preferences rows so the native group card remains visible. */
++  gtk_widget_set_visible (GTK_WIDGET (self->sensel_group), self->have_touchpad);
++  gtk_widget_set_visible (GTK_WIDGET (self->sensel_status_row),
++                          self->sensel_hidraw == NULL);
++  gtk_widget_set_visible (GTK_WIDGET (self->sensel_haptic_feedback_row),
++                          self->sensel_hidraw != NULL);
++  gtk_widget_set_visible (GTK_WIDGET (self->sensel_intensity_row),
++                          self->sensel_hidraw != NULL);
++  gtk_widget_set_visible (GTK_WIDGET (self->sensel_click_force_row),
++                          self->sensel_hidraw != NULL);
++  gtk_widget_set_visible (GTK_WIDGET (self->sensel_trackpoint_buttons_row),
++                          self->sensel_hidraw != NULL);
++  gtk_widget_set_visible (GTK_WIDGET (self->sensel_trackpoint_force_row),
++                          self->sensel_hidraw != NULL);
++
++  if (self->sensel_hidraw && !self->sensel_state_synced)
++    {
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_intensity_scale), FALSE);
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_haptic_feedback_row), FALSE);
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_click_force_scale), FALSE);
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_trackpoint_buttons_row), FALSE);
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_trackpoint_force_scale), FALSE);
++      sensel_read_current_state (self);
++    }
++  else if (!self->sensel_hidraw)
++    {
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_intensity_scale), FALSE);
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_haptic_feedback_row), FALSE);
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_click_force_scale), FALSE);
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_trackpoint_buttons_row), FALSE);
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_trackpoint_force_scale), FALSE);
++    }
++}
++
++static guint
++sensel_snap_scale_level (GtkRange  *range,
++                         guint      lower,
++                         guint      upper,
++                         gboolean  *syncing)
++{
++  gdouble value;
++  gint level;
++
++  value = gtk_range_get_value (range);
++  level = (gint) floor (value + 0.5);
++  level = CLAMP (level, (gint) lower, (gint) upper);
++
++  if (!*syncing && value != (gdouble) level)
++    {
++      *syncing = TRUE;
++      gtk_range_set_value (range, level);
++      *syncing = FALSE;
++    }
++
++  return (guint) level;
++}
++
++static guint
++sensel_intensity_for_level (guint level)
++{
++  level = CLAMP (level,
++                 (guint) SENSEL_HAPTIC_LEVEL_MIN,
++                 (guint) SENSEL_HAPTIC_LEVEL_MAX);
++  return sensel_haptic_intensity_levels[level - 1];
++}
++
++static guint
++sensel_level_to_intensity (CcMousePanel *self)
++{
++  guint level;
++
++  level = sensel_snap_scale_level (GTK_RANGE (self->sensel_intensity_scale),
++                                   SENSEL_HAPTIC_LEVEL_MIN,
++                                   SENSEL_HAPTIC_LEVEL_MAX,
++                                   &self->sensel_syncing_scale);
++  return sensel_intensity_for_level (level);
++}
++
++static guint
++sensel_intensity_to_level (guint intensity)
++{
++  guint best_level = SENSEL_HAPTIC_DEFAULT_LEVEL;
++  guint best_distance = G_MAXUINT;
++
++  if (intensity == 0)
++    return SENSEL_HAPTIC_DEFAULT_LEVEL;
++
++  for (guint i = 0; i < G_N_ELEMENTS (sensel_haptic_intensity_levels); i++)
++    {
++      guint level_intensity = sensel_haptic_intensity_levels[i];
++      guint distance = intensity > level_intensity ?
++                       intensity - level_intensity : level_intensity - intensity;
++
++      if (distance < best_distance)
++        {
++          best_distance = distance;
++          best_level = i + SENSEL_HAPTIC_LEVEL_MIN;
++        }
++    }
++
++  return best_level;
++}
++
++static guint
++sensel_level_to_click_force (CcMousePanel *self)
++{
++  static const guint force_map[] = { 120, 164, 190 };
++  gint level;
++
++  level = (gint) sensel_snap_scale_level (GTK_RANGE (self->sensel_click_force_scale),
++                                          0,
++                                          G_N_ELEMENTS (force_map) - 1,
++                                          &self->sensel_syncing_click_force);
++
++  return force_map[level];
++}
++
++static guint
++sensel_click_force_to_level (guint force)
++{
++  /* Windows uses upper-bound tests when it maps a device value back to the
++   * three ComboBox entries. Preserve those thresholds for non-standard
++   * values already present in device NVM. */
++  if (force <= 120)
++    return 0;
++  if (force <= 164)
++    return 1;
++  return 2;
++}
++
++static guint
++sensel_level_to_trackpoint_force (CcMousePanel *self)
++{
++  static const guint force_map[] = { 28, 38, 60 };
++  gint level;
++
++  level = (gint) sensel_snap_scale_level (GTK_RANGE (self->sensel_trackpoint_force_scale),
++                                          0,
++                                          G_N_ELEMENTS (force_map) - 1,
++                                          &self->sensel_syncing_trackpoint_force);
++
++  return force_map[level];
++}
++
++static guint
++sensel_trackpoint_force_to_level (guint force)
++{
++  /* Windows stores the 3HB combo values directly in the Gf/2 registers:
++   * 28, 38 and 60. Its initialization code compares the doubled values
++   * against 56 and 76, which is equivalent to these raw thresholds. */
++  if (force <= 28)
++    return 0;
++  if (force <= 38)
++    return 1;
++  return 2;
++}
++
++static gboolean
++sensel_ensure_daemon (CcMousePanel *self)
++{
++  const char *pkexec = "/usr/bin/pkexec";
++  const gchar *argv[5];
++  g_autoptr(GError) error = NULL;
++
++  if (self->sensel_process)
++    return TRUE;
++
++  if (!self->sensel_hidraw)
++    {
++      update_sensel_ui (self);
++      if (!self->sensel_hidraw)
++        {
++          g_warning ("Sensel haptic touchpad was not detected");
++          return FALSE;
++        }
++    }
++
++  if (!g_file_test (SENSEL_HAPTIC_HELPER, G_FILE_TEST_IS_EXECUTABLE))
++    {
++      g_warning ("Sensel helper is not installed at %s", SENSEL_HAPTIC_HELPER);
++      return FALSE;
++    }
++
++  argv[0] = pkexec;
++  argv[1] = SENSEL_HAPTIC_HELPER;
++  argv[2] = "--daemon";
++  argv[3] = self->sensel_hidraw;
++  argv[4] = NULL;
++
++  self->sensel_process = g_subprocess_newv (
++    argv,
++    G_SUBPROCESS_FLAGS_STDIN_PIPE |
++    G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
++    G_SUBPROCESS_FLAGS_STDERR_SILENCE,
++    &error);
++
++  if (!self->sensel_process)
++    {
++      g_warning ("Could not start the Sensel privileged helper: %s",
++                 error->message);
++      return FALSE;
++    }
++
++  return TRUE;
++}
++
++static void
++sensel_stop_daemon (CcMousePanel *self)
++{
++  if (self->sensel_process)
++    {
++      g_subprocess_force_exit (self->sensel_process);
++      g_clear_object (&self->sensel_process);
++    }
++}
++
++static void
++sensel_stop_state_read (CcMousePanel *self)
++{
++  if (self->sensel_state_read_process)
++    {
++      g_subprocess_force_exit (self->sensel_state_read_process);
++      g_clear_object (&self->sensel_state_read_process);
++    }
++}
++
++static void
++sensel_stop_read (CcMousePanel *self)
++{
++  if (self->sensel_read_process)
++    {
++      g_subprocess_force_exit (self->sensel_read_process);
++      g_clear_object (&self->sensel_read_process);
++    }
++}
++
++static void
++sensel_stop_click_read (CcMousePanel *self)
++{
++  if (self->sensel_click_read_process)
++    {
++      g_subprocess_force_exit (self->sensel_click_read_process);
++      g_clear_object (&self->sensel_click_read_process);
++    }
++}
++
++static void
++sensel_stop_click_write (CcMousePanel *self)
++{
++  if (self->sensel_click_write_process)
++    {
++      g_subprocess_force_exit (self->sensel_click_write_process);
++      g_clear_object (&self->sensel_click_write_process);
++    }
++
++  self->sensel_pending_click_force = 0;
++}
++
++static void
++sensel_stop_trackpoint_write (CcMousePanel *self)
++{
++  if (self->sensel_trackpoint_buttons_write_process)
++    {
++      g_subprocess_force_exit (self->sensel_trackpoint_buttons_write_process);
++      g_clear_object (&self->sensel_trackpoint_buttons_write_process);
++    }
++
++  if (self->sensel_trackpoint_force_write_process)
++    {
++      g_subprocess_force_exit (self->sensel_trackpoint_force_write_process);
++      g_clear_object (&self->sensel_trackpoint_force_write_process);
++    }
++
++  self->sensel_pending_trackpoint_force = 0;
++}
++
++static gboolean
++sensel_state_value (const gchar *state,
++                    const gchar *key,
++                    guint        *value)
++{
++  g_auto(GStrv) lines = g_strsplit (state ? state : "", "\n", -1);
++  gsize key_length = strlen (key);
++
++  for (guint i = 0; lines[i] != NULL; i++)
++    {
++      gchar *end = NULL;
++      guint64 parsed;
++
++      if (!g_str_has_prefix (lines[i], key) || lines[i][key_length] != '=')
++        continue;
++
++      parsed = g_ascii_strtoull (lines[i] + key_length + 1, &end, 10);
++      while (end && g_ascii_isspace (*end))
++        end++;
++
++      if (end == lines[i] + key_length + 1 || (end && *end != '\0') ||
++          parsed > G_MAXUINT)
++        return FALSE;
++
++      *value = (guint) parsed;
++      return TRUE;
++    }
++
++  return FALSE;
++}
++
++static gchar *
++sensel_preferences_path (void)
++{
++  return g_build_filename (g_get_user_config_dir (),
++                            "sensel-haptic-touchpad.ini",
++                            NULL);
++}
++
++static void
++sensel_load_haptic_preferences (CcMousePanel *self,
++                                gboolean      *enabled)
++{
++  g_autoptr(GKeyFile) key_file = g_key_file_new ();
++  g_autoptr(GError) error = NULL;
++  g_autofree gchar *path = sensel_preferences_path ();
++  gint saved_intensity;
++
++  *enabled = FALSE;
++  self->sensel_saved_intensity = sensel_intensity_for_level (SENSEL_HAPTIC_DEFAULT_LEVEL);
++  self->sensel_have_saved_intensity = FALSE;
++
++  if (!g_key_file_load_from_file (key_file, path, G_KEY_FILE_NONE, NULL))
++    return;
++
++  saved_intensity = g_key_file_get_integer (key_file,
++                                            "Sensel",
++                                            "ptpIntensity",
++                                            &error);
++  if (!error && saved_intensity > 0 && saved_intensity <= 100)
++    {
++      self->sensel_saved_intensity = (guint) saved_intensity;
++      self->sensel_have_saved_intensity = TRUE;
++    }
++
++  g_clear_error (&error);
++  *enabled = g_key_file_get_boolean (key_file,
++                                     "Sensel",
++                                     "toggleSwitchHapticFeedbackIsOn",
++                                     &error);
++}
++
++static void
++sensel_save_haptic_preferences (CcMousePanel *self,
++                                guint         intensity,
++                                gboolean      enabled)
++{
++  g_autoptr(GKeyFile) key_file = g_key_file_new ();
++  g_autofree gchar *path = sensel_preferences_path ();
++  g_autofree gchar *data = NULL;
++  g_autofree gchar *directory = NULL;
++  gsize data_length;
++
++  if (intensity > 0 && intensity <= 100)
++    {
++      self->sensel_saved_intensity = intensity;
++      self->sensel_have_saved_intensity = TRUE;
++    }
++
++  g_key_file_load_from_file (key_file, path, G_KEY_FILE_NONE, NULL);
++  if (self->sensel_have_saved_intensity)
++    g_key_file_set_integer (key_file,
++                            "Sensel",
++                            "ptpIntensity",
++                            (gint) self->sensel_saved_intensity);
++  g_key_file_set_boolean (key_file,
++                          "Sensel",
++                          "toggleSwitchHapticFeedbackIsOn",
++                          enabled);
++
++  data = g_key_file_to_data (key_file, &data_length, NULL);
++  directory = g_path_get_dirname (path);
++  if (g_mkdir_with_parents (directory, 0700) != 0 ||
++      !g_file_set_contents (path, data, (gssize) data_length, NULL))
++    g_warning ("Could not save Sensel haptic preferences");
++}
++
++static void
++sensel_read_current_state_cb (GObject      *source_object,
++                              GAsyncResult *result,
++                              gpointer      user_data)
++{
++  CcMousePanel *self = CC_MOUSE_PANEL (user_data);
++  GSubprocess *process = G_SUBPROCESS (source_object);
++  g_autofree gchar *stdout_buf = NULL;
++  g_autofree gchar *stderr_buf = NULL;
++  g_autoptr(GError) error = NULL;
++  guint intensity;
++  guint click_force;
++  guint trackpoint_force;
++  guint trackpoint_buttons;
++  gboolean haptic_enabled;
++
++  if (!g_subprocess_communicate_utf8_finish (process,
++                                             result,
++                                             &stdout_buf,
++                                             &stderr_buf,
++                                             &error))
++    {
++      if (self->sensel_state_read_process == process)
++        {
++          g_clear_object (&self->sensel_state_read_process);
++          gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_haptic_feedback_row), TRUE);
++          gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_intensity_scale), TRUE);
++          gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_click_force_scale), TRUE);
++          gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_trackpoint_buttons_row), TRUE);
++          gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_trackpoint_force_scale), TRUE);
++          g_warning ("Could not read the Sensel settings: %s", error->message);
++        }
++
++      g_object_unref (self);
++      return;
++    }
++
++  if (self->sensel_state_read_process != process)
++    {
++      g_object_unref (self);
++      return;
++    }
++
++  g_clear_object (&self->sensel_state_read_process);
++
++  if (!sensel_state_value (stdout_buf, "haptic-intensity", &intensity) ||
++      !sensel_state_value (stdout_buf, "click-force", &click_force) ||
++      !sensel_state_value (stdout_buf, "trackpoint-click-force", &trackpoint_force) ||
++      !sensel_state_value (stdout_buf, "trackpoint-buttons", &trackpoint_buttons) ||
++      intensity > 100 ||
++      trackpoint_buttons > 1)
++    {
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_haptic_feedback_row), TRUE);
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_intensity_scale), TRUE);
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_click_force_scale), TRUE);
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_trackpoint_buttons_row), TRUE);
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_trackpoint_force_scale), TRUE);
++      g_warning ("Sensel returned an invalid settings state");
++      g_object_unref (self);
++      return;
++    }
++
++  haptic_enabled = intensity > 0;
++  if (haptic_enabled)
++    sensel_save_haptic_preferences (self, intensity, TRUE);
++  else
++    {
++      sensel_load_haptic_preferences (self, &haptic_enabled);
++      intensity = self->sensel_saved_intensity;
++      /* A zero register value is the hardware off state. The saved local
++       * value is only used to repopulate the level slider and to restore it
++       * if the switch is turned on again. */
++      haptic_enabled = FALSE;
++    }
++
++  self->sensel_syncing_scale = TRUE;
++  gtk_range_set_value (GTK_RANGE (self->sensel_intensity_scale),
++                       sensel_intensity_to_level (intensity));
++  self->sensel_syncing_scale = FALSE;
++
++  self->sensel_syncing_click_force = TRUE;
++  gtk_range_set_value (GTK_RANGE (self->sensel_click_force_scale),
++                       sensel_click_force_to_level (click_force));
++  self->sensel_syncing_click_force = FALSE;
++
++  self->sensel_syncing_trackpoint_force = TRUE;
++  gtk_range_set_value (GTK_RANGE (self->sensel_trackpoint_force_scale),
++                       sensel_trackpoint_force_to_level (trackpoint_force));
++  self->sensel_syncing_trackpoint_force = FALSE;
++
++  self->sensel_syncing_haptic_feedback = TRUE;
++  adw_switch_row_set_active (self->sensel_haptic_feedback_row, haptic_enabled);
++  self->sensel_syncing_haptic_feedback = FALSE;
++
++  self->sensel_syncing_trackpoint_buttons = TRUE;
++  adw_switch_row_set_active (self->sensel_trackpoint_buttons_row,
++                             trackpoint_buttons != 0);
++  self->sensel_syncing_trackpoint_buttons = FALSE;
++
++  self->sensel_value_synced = TRUE;
++  self->sensel_click_force_synced = TRUE;
++  self->sensel_trackpoint_force_synced = TRUE;
++  self->sensel_state_synced = TRUE;
++  gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_haptic_feedback_row), TRUE);
++  gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_intensity_scale), haptic_enabled);
++  gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_click_force_scale), TRUE);
++  gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_trackpoint_buttons_row), TRUE);
++  gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_trackpoint_force_scale),
++                            trackpoint_buttons != 0);
++
++  g_object_unref (self);
++}
++
++static void
++sensel_read_current_state (CcMousePanel *self)
++{
++  const char *pkexec = "/usr/bin/pkexec";
++  const gchar *argv[5];
++  g_autoptr(GError) error = NULL;
++
++  if (!self->sensel_hidraw || self->sensel_state_read_process ||
++      self->sensel_state_synced)
++    return;
++
++  if (!g_file_test (SENSEL_HAPTIC_HELPER, G_FILE_TEST_IS_EXECUTABLE))
++    {
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_haptic_feedback_row), TRUE);
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_intensity_scale), TRUE);
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_click_force_scale), TRUE);
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_trackpoint_buttons_row), TRUE);
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_trackpoint_force_scale), TRUE);
++      g_warning ("Sensel helper is not installed at %s", SENSEL_HAPTIC_HELPER);
++      return;
++    }
++
++  argv[0] = pkexec;
++  argv[1] = SENSEL_HAPTIC_HELPER;
++  argv[2] = "--get-state";
++  argv[3] = self->sensel_hidraw;
++  argv[4] = NULL;
++
++  self->sensel_state_read_process = g_subprocess_newv (
++    argv,
++    G_SUBPROCESS_FLAGS_STDOUT_PIPE |
++    G_SUBPROCESS_FLAGS_STDERR_SILENCE,
++    &error);
++
++  if (!self->sensel_state_read_process)
++    {
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_haptic_feedback_row), TRUE);
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_intensity_scale), TRUE);
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_click_force_scale), TRUE);
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_trackpoint_buttons_row), TRUE);
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_trackpoint_force_scale), TRUE);
++      g_warning ("Could not start the Sensel state helper: %s", error->message);
++      return;
++    }
++
++  g_subprocess_communicate_utf8_async (self->sensel_state_read_process,
++                                       NULL,
++                                       NULL,
++                                       sensel_read_current_state_cb,
++                                       g_object_ref (self));
++}
++
++static void
++sensel_send_intensity (CcMousePanel *self,
++                       guint         intensity)
++{
++  GOutputStream *stdin_pipe;
++  g_autofree gchar *value = NULL;
++  g_autoptr(GError) error = NULL;
++  gsize bytes_written;
++
++  if (!sensel_ensure_daemon (self))
++    return;
++
++  value = g_strdup_printf ("%u\n", intensity);
++  stdin_pipe = g_subprocess_get_stdin_pipe (self->sensel_process);
++
++  if (!g_output_stream_write_all (stdin_pipe,
++                                  value,
++                                  strlen (value),
++                                  &bytes_written,
++                                  NULL,
++                                  &error))
++    {
++      g_warning ("Could not apply the Sensel setting: %s", error->message);
++      sensel_stop_daemon (self);
++      return;
++    }
++
++  self->sensel_value_synced = TRUE;
++}
++
++static void
++sensel_intensity_pressed_cb (CcMousePanel *self,
++                             gint          n_press,
++                             double        x,
++                             double        y)
++{
++  (void) n_press;
++  (void) x;
++  (void) y;
++
++  /* Start pkexec while the pointer is being pressed, so the first slider
++   * movement can be written to the already-open stdin pipe. */
++  sensel_ensure_daemon (self);
++}
++
++static void
++sensel_intensity_changed_cb (CcMousePanel *self)
++{
++  guint intensity;
++
++  if (self->sensel_syncing_scale)
++    return;
++
++  intensity = sensel_level_to_intensity (self);
++  self->sensel_pending_intensity = intensity;
++  sensel_save_haptic_preferences (self, intensity, TRUE);
++  sensel_send_intensity (self, self->sensel_pending_intensity);
++}
++
++static void
++sensel_intensity_released_cb (CcMousePanel *self,
++                              gint          n_press,
++                              double        x,
++                              double        y)
++{
++  (void) n_press;
++  (void) x;
++  (void) y;
++
++  /* Always resend the final level on release, even when the pointer stopped
++   * between two discrete slider levels. */
++  sensel_intensity_changed_cb (self);
++}
++
++static void
++sensel_haptic_feedback_changed_cb (CcMousePanel *self)
++{
++  gboolean enabled;
++  guint intensity;
++
++  if (self->sensel_syncing_haptic_feedback || !self->sensel_hidraw)
++    return;
++
++  enabled = adw_switch_row_get_active (self->sensel_haptic_feedback_row);
++  if (enabled)
++    {
++      intensity = self->sensel_saved_intensity;
++      if (!self->sensel_have_saved_intensity)
++        intensity = sensel_intensity_for_level (SENSEL_HAPTIC_DEFAULT_LEVEL);
++
++      /* Migrate arbitrary/raw values from older builds to the nearest of
++       * the ten supported non-linear levels before writing them back. */
++      intensity = sensel_intensity_for_level (sensel_intensity_to_level (intensity));
++
++      self->sensel_syncing_scale = TRUE;
++      gtk_range_set_value (GTK_RANGE (self->sensel_intensity_scale),
++                           sensel_intensity_to_level (intensity));
++      self->sensel_syncing_scale = FALSE;
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_intensity_scale), TRUE);
++      sensel_save_haptic_preferences (self, intensity, TRUE);
++      sensel_send_intensity (self, intensity);
++    }
++  else
++    {
++      intensity = sensel_level_to_intensity (self);
++      if (intensity > 0)
++        {
++          self->sensel_saved_intensity = intensity;
++          self->sensel_have_saved_intensity = TRUE;
++        }
++
++      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_intensity_scale), FALSE);
++      /* Do not overwrite the remembered value with zero when turning the
++       * switch off. Zero belongs only in the device register. */
++      sensel_save_haptic_preferences (self,
++                                      self->sensel_saved_intensity,
++                                      FALSE);
++      sensel_send_intensity (self, 0);
++    }
++}
++
++static void
++sensel_trackpoint_buttons_write_cb (GObject      *source_object,
++                                    GAsyncResult *result,
++                                    gpointer      user_data)
++{
++  CcMousePanel *self = CC_MOUSE_PANEL (user_data);
++  GSubprocess *process = G_SUBPROCESS (source_object);
++  g_autoptr(GError) error = NULL;
++
++  if (self->sensel_trackpoint_buttons_write_process != process)
++    {
++      g_object_unref (self);
++      return;
++    }
++
++  if (!g_subprocess_wait_check_finish (process, result, &error))
++    g_warning ("Could not apply the Sensel TrackPoint button mode: %s",
++               error ? error->message : "helper exited unsuccessfully");
++
++  g_clear_object (&self->sensel_trackpoint_buttons_write_process);
++  g_object_unref (self);
++}
++
++static void
++sensel_trackpoint_buttons_changed_cb (CcMousePanel *self)
++{
++  const char *pkexec = "/usr/bin/pkexec";
++  const gchar *argv[6];
++  g_autofree gchar *enabled_string = NULL;
++  g_autoptr(GError) error = NULL;
++  gboolean enabled;
++
++  if (self->sensel_syncing_trackpoint_buttons || !self->sensel_hidraw)
++    return;
++
++  enabled = adw_switch_row_get_active (self->sensel_trackpoint_buttons_row);
++  gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_trackpoint_force_scale), enabled);
++
++  if (self->sensel_trackpoint_buttons_write_process)
++    {
++      g_subprocess_force_exit (self->sensel_trackpoint_buttons_write_process);
++      g_clear_object (&self->sensel_trackpoint_buttons_write_process);
++    }
++
++  enabled_string = g_strdup_printf ("%u", enabled ? 1 : 0);
++  argv[0] = pkexec;
++  argv[1] = SENSEL_HAPTIC_HELPER;
++  argv[2] = "--set-trackpoint-buttons";
++  argv[3] = self->sensel_hidraw;
++  argv[4] = enabled_string;
++  argv[5] = NULL;
++
++  self->sensel_trackpoint_buttons_write_process = g_subprocess_newv (
++    argv,
++    G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
++    G_SUBPROCESS_FLAGS_STDERR_SILENCE,
++    &error);
++
++  if (!self->sensel_trackpoint_buttons_write_process)
++    {
++      g_warning ("Could not start the Sensel TrackPoint button helper: %s",
++                 error->message);
++      return;
++    }
++
++  g_subprocess_wait_check_async (self->sensel_trackpoint_buttons_write_process,
++                                 NULL,
++                                 sensel_trackpoint_buttons_write_cb,
++                                 g_object_ref (self));
++}
++
++static void
++sensel_click_force_write_cb (GObject      *source_object,
++                             GAsyncResult *result,
++                             gpointer      user_data)
++{
++  CcMousePanel *self = CC_MOUSE_PANEL (user_data);
++  GSubprocess *process = G_SUBPROCESS (source_object);
++  g_autoptr(GError) error = NULL;
++  guint pending_force;
++  gboolean success;
++
++  success = g_subprocess_wait_check_finish (process, result, &error);
++
++  if (self->sensel_click_write_process != process)
++    {
++      g_object_unref (self);
++      return;
++    }
++
++  g_clear_object (&self->sensel_click_write_process);
++
++  if (!success)
++    {
++      self->sensel_click_force_synced = FALSE;
++      g_warning ("Could not apply the Sensel click force: %s",
++                 error ? error->message : "helper exited unsuccessfully");
++    }
++  else
++    {
++      self->sensel_click_force_synced = TRUE;
++    }
++
++  pending_force = self->sensel_pending_click_force;
++  self->sensel_pending_click_force = 0;
++  if (pending_force != 0)
++    sensel_send_click_force (self, pending_force);
++
++  g_object_unref (self);
++}
++
++static void
++sensel_send_click_force (CcMousePanel *self,
++                         guint         force)
++{
++  const char *pkexec = "/usr/bin/pkexec";
++  const gchar *argv[6];
++  g_autofree gchar *force_string = NULL;
++  g_autoptr(GError) error = NULL;
++
++  if (force != 120 && force != 164 && force != 190)
++    return;
++
++  if (!self->sensel_hidraw)
++    {
++      update_sensel_ui (self);
++      if (!self->sensel_hidraw)
++        {
++          g_warning ("Sensel haptic touchpad was not detected");
++          return;
++        }
++    }
++
++  if (self->sensel_click_write_process)
++    {
++      self->sensel_pending_click_force = force;
++      return;
++    }
++
++  if (!g_file_test (SENSEL_HAPTIC_HELPER, G_FILE_TEST_IS_EXECUTABLE))
++    {
++      g_warning ("Sensel helper is not installed at %s", SENSEL_HAPTIC_HELPER);
++      return;
++    }
++
++  force_string = g_strdup_printf ("%u", force);
++  argv[0] = pkexec;
++  argv[1] = SENSEL_HAPTIC_HELPER;
++  argv[2] = "--set-click-force";
++  argv[3] = self->sensel_hidraw;
++  argv[4] = force_string;
++  argv[5] = NULL;
++
++  self->sensel_click_write_process = g_subprocess_newv (
++    argv,
++    G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
++    G_SUBPROCESS_FLAGS_STDERR_SILENCE,
++    &error);
++
++  if (!self->sensel_click_write_process)
++    {
++      g_warning ("Could not start the Sensel click-force helper: %s",
++                 error->message);
++      return;
++    }
++
++  g_subprocess_wait_check_async (self->sensel_click_write_process,
++                                 NULL,
++                                 sensel_click_force_write_cb,
++                                 g_object_ref (self));
++}
++
++static void
++sensel_click_force_changed_cb (CcMousePanel *self)
++{
++  if (self->sensel_syncing_click_force)
++    return;
++
++  sensel_send_click_force (self, sensel_level_to_click_force (self));
++}
++
++static void
++sensel_click_force_pressed_cb (CcMousePanel *self,
++                               gint          n_press,
++                               double        x,
++                               double        y)
++{
++  (void) self;
++  (void) n_press;
++  (void) x;
++  (void) y;
++}
++
++static void
++sensel_click_force_released_cb (CcMousePanel *self,
++                                gint          n_press,
++                                double        x,
++                                double        y)
++{
++  (void) n_press;
++  (void) x;
++  (void) y;
++
++  /* Match the feedback slider: ensure the final discrete position is sent. */
++  sensel_send_click_force (self, sensel_level_to_click_force (self));
++}
++
++static void
++sensel_trackpoint_force_write_cb (GObject      *source_object,
++                                  GAsyncResult *result,
++                                  gpointer      user_data)
++{
++  CcMousePanel *self = CC_MOUSE_PANEL (user_data);
++  GSubprocess *process = G_SUBPROCESS (source_object);
++  g_autoptr(GError) error = NULL;
++  guint pending_force;
++
++  if (self->sensel_trackpoint_force_write_process != process)
++    {
++      g_object_unref (self);
++      return;
++    }
++
++  if (!g_subprocess_wait_check_finish (process, result, &error))
++    {
++      self->sensel_trackpoint_force_synced = FALSE;
++      g_warning ("Could not apply the Sensel TrackPoint click force: %s",
++                 error ? error->message : "helper exited unsuccessfully");
++    }
++  else
++    {
++      self->sensel_trackpoint_force_synced = TRUE;
++    }
++
++  g_clear_object (&self->sensel_trackpoint_force_write_process);
++  pending_force = self->sensel_pending_trackpoint_force;
++  self->sensel_pending_trackpoint_force = 0;
++  if (pending_force != 0)
++    sensel_send_trackpoint_force (self, pending_force);
++
++  g_object_unref (self);
++}
++
++static void
++sensel_send_trackpoint_force (CcMousePanel *self,
++                              guint         force)
++{
++  const char *pkexec = "/usr/bin/pkexec";
++  const gchar *argv[6];
++  g_autofree gchar *force_string = NULL;
++  g_autoptr(GError) error = NULL;
++
++  if (force != 28 && force != 38 && force != 60)
++    return;
++
++  if (!self->sensel_hidraw)
++    {
++      update_sensel_ui (self);
++      if (!self->sensel_hidraw)
++        {
++          g_warning ("Sensel haptic touchpad was not detected");
++          return;
++        }
++    }
++
++  if (self->sensel_trackpoint_force_write_process)
++    {
++      self->sensel_pending_trackpoint_force = force;
++      return;
++    }
++
++  if (!g_file_test (SENSEL_HAPTIC_HELPER, G_FILE_TEST_IS_EXECUTABLE))
++    {
++      g_warning ("Sensel helper is not installed at %s", SENSEL_HAPTIC_HELPER);
++      return;
++    }
++
++  force_string = g_strdup_printf ("%u", force);
++  argv[0] = pkexec;
++  argv[1] = SENSEL_HAPTIC_HELPER;
++  argv[2] = "--set-trackpoint-click-force";
++  argv[3] = self->sensel_hidraw;
++  argv[4] = force_string;
++  argv[5] = NULL;
++
++  self->sensel_trackpoint_force_write_process = g_subprocess_newv (
++    argv,
++    G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
++    G_SUBPROCESS_FLAGS_STDERR_SILENCE,
++    &error);
++
++  if (!self->sensel_trackpoint_force_write_process)
++    {
++      g_warning ("Could not start the Sensel TrackPoint force helper: %s",
++                 error->message);
++      return;
++    }
++
++  g_subprocess_wait_check_async (self->sensel_trackpoint_force_write_process,
++                                 NULL,
++                                 sensel_trackpoint_force_write_cb,
++                                 g_object_ref (self));
++}
++
++static void
++sensel_trackpoint_force_changed_cb (CcMousePanel *self)
++{
++  if (self->sensel_syncing_trackpoint_force)
++    return;
++
++  sensel_send_trackpoint_force (self,
++                                sensel_level_to_trackpoint_force (self));
++}
++
+ static void
+ on_primary_button_changed_cb (CcMousePanel *self)
+ {
+@@ -367,7 +1483,10 @@
+                                 pointingstick_accel_set_mapping,
+                                 NULL, NULL);
+ 
++  self->sensel_pending_intensity = sensel_level_to_intensity (self);
++
+   setup_title_stack (self);
++  update_sensel_ui (self);
+ }
+ 
+ /* Callback issued when a button is clicked on the dialog */
+@@ -382,6 +1501,7 @@
+   self->have_mouse = mouse_is_present ();
+   gtk_widget_set_visible (GTK_WIDGET (self->mouse_group), self->have_mouse);
+   gtk_widget_set_visible (GTK_WIDGET (self->touchpad_toggle_row), can_disable_touchpad (self));
++  update_sensel_ui (self);
+ }
+ 
+ static void
+@@ -402,6 +1522,13 @@
+ 
+   g_clear_object (&self->mouse_settings);
+   g_clear_object (&self->touchpad_settings);
++  sensel_stop_read (self);
++  sensel_stop_daemon (self);
++  sensel_stop_state_read (self);
++  sensel_stop_click_read (self);
++  sensel_stop_click_write (self);
++  sensel_stop_trackpoint_write (self);
++  g_clear_pointer (&self->sensel_hidraw, g_free);
+   g_clear_pointer (&self->mouse_test, gtk_window_destroy);
+ 
+   G_OBJECT_CLASS (cc_mouse_panel_parent_class)->dispose (object);
+@@ -487,9 +1614,28 @@
+   gtk_widget_class_bind_template_child (widget_class, CcMousePanel, touchpad_toggle_row);
+   gtk_widget_class_bind_template_child (widget_class, CcMousePanel, touchpad_typing_row);
+   gtk_widget_class_bind_template_child (widget_class, CcMousePanel, two_finger_push_row);
++  gtk_widget_class_bind_template_child (widget_class, CcMousePanel, sensel_group);
++  gtk_widget_class_bind_template_child (widget_class, CcMousePanel, sensel_status_row);
++  gtk_widget_class_bind_template_child (widget_class, CcMousePanel, sensel_haptic_feedback_row);
++  gtk_widget_class_bind_template_child (widget_class, CcMousePanel, sensel_intensity_row);
++  gtk_widget_class_bind_template_child (widget_class, CcMousePanel, sensel_click_force_row);
++  gtk_widget_class_bind_template_child (widget_class, CcMousePanel, sensel_trackpoint_buttons_row);
++  gtk_widget_class_bind_template_child (widget_class, CcMousePanel, sensel_trackpoint_force_row);
++  gtk_widget_class_bind_template_child (widget_class, CcMousePanel, sensel_intensity_scale);
++  gtk_widget_class_bind_template_child (widget_class, CcMousePanel, sensel_click_force_scale);
++  gtk_widget_class_bind_template_child (widget_class, CcMousePanel, sensel_trackpoint_force_scale);
+ 
+   gtk_widget_class_bind_template_callback (widget_class, on_primary_button_changed_cb);
+   gtk_widget_class_bind_template_callback (widget_class, on_touchpad_scroll_method_changed_cb);
+   gtk_widget_class_bind_template_callback (widget_class, primary_toggle_right_click_pressed_cb);
+   gtk_widget_class_bind_template_callback (widget_class, test_button_row_activated_cb);
++  gtk_widget_class_bind_template_callback (widget_class, sensel_haptic_feedback_changed_cb);
++  gtk_widget_class_bind_template_callback (widget_class, sensel_intensity_pressed_cb);
++  gtk_widget_class_bind_template_callback (widget_class, sensel_intensity_changed_cb);
++  gtk_widget_class_bind_template_callback (widget_class, sensel_intensity_released_cb);
++  gtk_widget_class_bind_template_callback (widget_class, sensel_trackpoint_buttons_changed_cb);
++  gtk_widget_class_bind_template_callback (widget_class, sensel_click_force_pressed_cb);
++  gtk_widget_class_bind_template_callback (widget_class, sensel_click_force_changed_cb);
++  gtk_widget_class_bind_template_callback (widget_class, sensel_click_force_released_cb);
++  gtk_widget_class_bind_template_callback (widget_class, sensel_trackpoint_force_changed_cb);
+ }
+--- a/panels/mouse/cc-mouse-panel.blp
++++ b/panels/mouse/cc-mouse-panel.blp
+@@ -204,6 +204,119 @@
+               }
+             }
+ 
++            Adw.PreferencesGroup sensel_group {
++              visible: false;
++              sensitive: bind touchpad_toggle_row.active;
++              title: _("Sensel Haptic Touchpad");
++
++              Adw.ActionRow sensel_status_row {
++                visible: false;
++                title: _("Device not detected");
++              }
++
++              Adw.SwitchRow sensel_haptic_feedback_row {
++                visible: false;
++                title: _("Haptic Feedback");
++                notify::active => $sensel_haptic_feedback_changed_cb(template);
++              }
++
++              Adw.ActionRow sensel_intensity_row {
++                visible: false;
++                title: _("Haptics Intensity");
++                activatable-widget: sensel_intensity_scale;
++
++                [suffix]
++                Scale sensel_intensity_scale {
++                  width-request: 220;
++                  hexpand: false;
++                  halign: end;
++                  draw-value: true;
++                  digits: 0;
++                  round-digits: 0;
++                  value-pos: right;
++                  value-changed => $sensel_intensity_changed_cb(template);
++
++                  GestureClick {
++                    propagation-phase: capture;
++                    pressed => $sensel_intensity_pressed_cb(template);
++                    released => $sensel_intensity_released_cb(template);
++                  }
++
++                  adjustment: Adjustment {
++                    lower: 1;
++                    upper: 10;
++                    value: 5;
++                    step-increment: 1;
++                    page-increment: 1;
++                  };
++                }
++              }
++
++              Adw.ActionRow sensel_click_force_row {
++                visible: false;
++                title: _("Click Force");
++                activatable-widget: sensel_click_force_scale;
++
++                [suffix]
++                Scale sensel_click_force_scale {
++                  width-request: 220;
++                  hexpand: false;
++                  halign: end;
++                  draw-value: false;
++                  value-changed => $sensel_click_force_changed_cb(template);
++
++                  marks [
++                    mark (0, bottom, _("Low")),
++                    mark (1, bottom, _("Medium")),
++                    mark (2, bottom, _("High")),
++                  ]
++
++                  adjustment: Adjustment {
++                    lower: 0;
++                    upper: 2;
++                    value: 1;
++                    step-increment: 1;
++                    page-increment: 1;
++                  };
++                }
++              }
++
++              Adw.SwitchRow sensel_trackpoint_buttons_row {
++                visible: false;
++                title: _("Enable TrackPoint Buttons");
++                notify::active => $sensel_trackpoint_buttons_changed_cb(template);
++              }
++
++              Adw.ActionRow sensel_trackpoint_force_row {
++                visible: false;
++                title: _("TrackPoint Click Force");
++                activatable-widget: sensel_trackpoint_force_scale;
++
++                [suffix]
++                Scale sensel_trackpoint_force_scale {
++                  width-request: 220;
++                  hexpand: false;
++                  halign: end;
++                  draw-value: false;
++                  value-changed => $sensel_trackpoint_force_changed_cb(template);
++
++                  marks [
++                    mark (0, bottom, _("Low")),
++                    mark (1, bottom, _("Medium")),
++                    mark (2, bottom, _("High")),
++                  ]
++
++                  adjustment: Adjustment {
++                    lower: 0;
++                    upper: 2;
++                    value: 1;
++                    step-increment: 1;
++                    page-increment: 1;
++                  };
++                }
++              }
++            }
++
+             Adw.PreferencesGroup {
+               title: _("Clicking");
+               sensitive: bind touchpad_toggle_row.active;
+--- a/po/zh_CN.po
++++ b/po/zh_CN.po
+@@ -34,9 +34,8 @@
+ msgid ""
+ msgstr ""
+ "Project-Id-Version: gnome-control-center master\n"
+-"Report-Msgid-Bugs-To: https://gitlab.gnome.org/GNOME/gnome-control-center/"
+-"issues\n"
+-"POT-Creation-Date: 2026-02-10 13:00+0000\n"
++"Report-Msgid-Bugs-To: \n"
++"POT-Creation-Date: 2026-08-16 02:44+0800\n"
+ "PO-Revision-Date: 2026-02-18 09:31+0800\n"
+ "Last-Translator: lumingzh <lumingzh@qq.com>\n"
+ "Language-Team: Chinese (China) <i18n-zh@googlegroups.com>\n"
+@@ -62,7 +61,7 @@
+ #: panels/keyboard/cc-keyboard-shortcut-dialog.blp:144
+ #: panels/keyboard/cc-keyboard-shortcut-editor.blp:13
+ #: panels/network/cc-net-proxy-page.blp:15
+-#: panels/network/cc-wifi-hotspot-dialog.blp:122
++#: panels/network/cc-wifi-hotspot-dialog.blp:129
+ #: panels/network/cc-wifi-panel.blp:180
+ #: panels/network/connection-editor/ce-page-details.c:89
+ #: panels/network/connection-editor/connection-editor.blp:17
+@@ -258,7 +257,7 @@
+ #: panels/keyboard/keyboard-shortcuts.c:367 panels/network/panel-common.c:336
+ #: panels/system/users/cc-user-page.c:368
+ #: panels/system/users/cc-user-page.c:753 panels/wwan/cc-wwan-device-page.c:483
+-#: subprojects/gvc/gvc-mixer-control.c:1910
++#: subprojects/gvc/gvc-mixer-control.c:1919
+ msgid "Disabled"
+ msgstr "已禁用"
+ 
+@@ -494,8 +493,8 @@
+ 
+ #: panels/applications/cc-applications-panel.c:897
+ #: panels/keyboard/01-launchers.xml.in:6
+-#: shell/appdata/org.gnome.Settings.metainfo.xml.in.in:7 shell/cc-window.blp:20
+-#: shell/cc-window.c:804 shell/org.gnome.Settings.desktop.in:2
++#: shell/appdata/org.gnome.Settings.metainfo.xml.in.in:8 shell/cc-window.blp:20
++#: shell/cc-window.c:842 shell/org.gnome.Settings.desktop.in:2
+ msgid "Settings"
+ msgstr "设置"
+ 
+@@ -2696,19 +2695,19 @@
+ msgstr "鼠标"
+ 
+ #: panels/mouse/cc-mouse-panel.blp:95 panels/mouse/cc-mouse-panel.blp:183
+-#: panels/mouse/cc-mouse-panel.blp:291
++#: panels/mouse/cc-mouse-panel.blp:332
+ msgid "Po_inter Speed"
+ msgstr "指针速度(_I)"
+ 
+ #: panels/mouse/cc-mouse-panel.blp:104 panels/mouse/cc-mouse-panel.blp:192
+-#: panels/mouse/cc-mouse-panel.blp:300
++#: panels/mouse/cc-mouse-panel.blp:341
+ #: panels/universal-access/cc-ua-typing-page.blp:52
+ #: panels/universal-access/cc-ua-typing-page.blp:97
+ msgid "Slow"
+ msgstr "慢"
+ 
+ #: panels/mouse/cc-mouse-panel.blp:106 panels/mouse/cc-mouse-panel.blp:194
+-#: panels/mouse/cc-mouse-panel.blp:302
++#: panels/mouse/cc-mouse-panel.blp:343
+ #: panels/universal-access/cc-ua-typing-page.blp:50
+ #: panels/universal-access/cc-ua-typing-page.blp:95
+ msgid "Fast"
+@@ -2718,7 +2717,7 @@
+ msgid "Mouse _Acceleration"
+ msgstr "鼠标加速(_A)"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:120 panels/mouse/cc-mouse-panel.blp:316
++#: panels/mouse/cc-mouse-panel.blp:120 panels/mouse/cc-mouse-panel.blp:357
+ msgid "Recommended for most users and applications"
+ msgstr "推荐用于多数用户和应用"
+ 
+@@ -2728,7 +2727,7 @@
+ "but can also make the mouse more difficult to use."
+ msgstr "关闭鼠标加速可以允许更快、更精确的移动，但也会使鼠标更难使用。"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:137 panels/mouse/cc-mouse-panel.blp:259
++#: panels/mouse/cc-mouse-panel.blp:137 panels/mouse/cc-mouse-panel.blp:300
+ msgid "Scroll Direction"
+ msgstr "滚动方向"
+ 
+@@ -2736,20 +2735,20 @@
+ msgid "Tra_ditional"
+ msgstr "传统(_D)"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:139 panels/mouse/cc-mouse-panel.blp:261
++#: panels/mouse/cc-mouse-panel.blp:139 panels/mouse/cc-mouse-panel.blp:302
+ msgid "Scrolling moves the view"
+ msgstr "滚动移动视图"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:141 panels/mouse/cc-mouse-panel.blp:263
++#: panels/mouse/cc-mouse-panel.blp:141 panels/mouse/cc-mouse-panel.blp:304
+ msgid "_Natural"
+ msgstr "自然(_N)"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:142 panels/mouse/cc-mouse-panel.blp:264
++#: panels/mouse/cc-mouse-panel.blp:142 panels/mouse/cc-mouse-panel.blp:305
+ msgid "Scrolling moves the content"
+ msgstr "滚动移动内容"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:149 panels/mouse/cc-mouse-panel.blp:271
+-#: panels/mouse/cc-mouse-panel.blp:335 panels/wacom/cc-wacom-panel.blp:11
++#: panels/mouse/cc-mouse-panel.blp:149 panels/mouse/cc-mouse-panel.blp:312
++#: panels/mouse/cc-mouse-panel.blp:376 panels/wacom/cc-wacom-panel.blp:11
+ msgid "Test _Settings"
+ msgstr "测试设置(_S)"
+ 
+@@ -2765,79 +2764,112 @@
+ msgid "_Disable Touchpad While Typing"
+ msgstr "打字时禁用触摸板(_D)"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:208
++#: panels/mouse/cc-mouse-panel.blp:210
++msgid "Sensel Haptic Touchpad"
++msgstr "Sensel 触觉触摸板"
++
++#: panels/mouse/cc-mouse-panel.blp:213
++msgid "Device not detected"
++msgstr "未检测到设备"
++
++#: panels/mouse/cc-mouse-panel.blp:217
++msgid "Haptic Feedback"
++msgstr "触觉反馈"
++
++#: panels/mouse/cc-mouse-panel.blp:223
++msgid "Haptics Intensity"
++msgstr "触觉强度"
++
++#: panels/mouse/cc-mouse-panel.blp:257
++msgid "Click Force"
++msgstr "点击力度"
++
++#: panels/mouse/cc-mouse-panel.blp:286
++msgid "Enable TrackPoint Buttons"
++msgstr "启用 TrackPoint 按钮"
++
++#: panels/mouse/cc-mouse-panel.blp:292
++msgid "TrackPoint Click Force"
++msgstr "TrackPoint 点击力度"
++
++#: panels/mouse/cc-mouse-panel.blp:270
++#: panels/mouse/cc-mouse-panel.blp:304
++msgid "Medium"
++msgstr "中"
++
++#: panels/mouse/cc-mouse-panel.blp:249
+ msgid "Clicking"
+ msgstr "点击"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:212 panels/mouse/cc-mouse-test.blp:110
++#: panels/mouse/cc-mouse-panel.blp:253 panels/mouse/cc-mouse-test.blp:110
+ msgid "Secondary Click"
+ msgstr "副键点击"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:213
++#: panels/mouse/cc-mouse-panel.blp:254
+ msgid "Two _Finger Push"
+ msgstr "双指推动(_F)"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:214
++#: panels/mouse/cc-mouse-panel.blp:255
+ msgid "Push anywhere with 2 fingers"
+ msgstr "用双指在任意位置推动"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:216
++#: panels/mouse/cc-mouse-panel.blp:257
+ msgid "_Corner Push"
+ msgstr "角落推动(_C)"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:217
++#: panels/mouse/cc-mouse-panel.blp:258
+ msgid "Push with a single finger in the corner"
+ msgstr "用一根手指在角落推动"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:227
++#: panels/mouse/cc-mouse-panel.blp:268
+ msgid "T_ap to Click"
+ msgstr "轻触以点击(_A)"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:229
++#: panels/mouse/cc-mouse-panel.blp:270
+ msgid "Quickly touch the touchpad to click"
+ msgstr "快速触摸触摸板以点击"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:240
++#: panels/mouse/cc-mouse-panel.blp:281
+ msgid "Scrolling"
+ msgstr "滚动"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:244
++#: panels/mouse/cc-mouse-panel.blp:285
+ msgid "Scroll Method"
+ msgstr "滚动方式"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:245
++#: panels/mouse/cc-mouse-panel.blp:286
+ msgid "T_wo Finger"
+ msgstr "双指(_W)"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:246
++#: panels/mouse/cc-mouse-panel.blp:287
+ msgid "Drag two fingers on the touchpad"
+ msgstr "在触摸板上拖动两根手指"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:248
++#: panels/mouse/cc-mouse-panel.blp:289
+ msgid "_Edge"
+ msgstr "边缘(_E)"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:249
++#: panels/mouse/cc-mouse-panel.blp:290
+ msgid "Drag one finger on the edge"
+ msgstr "在边缘拖动一根手指"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:260
++#: panels/mouse/cc-mouse-panel.blp:301
+ msgid "T_raditional"
+ msgstr "传统(_R)"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:282
++#: panels/mouse/cc-mouse-panel.blp:323
+ msgid "_Pointing Stick"
+ msgstr "指点杆(_P)"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:288
++#: panels/mouse/cc-mouse-panel.blp:329
+ msgid "Pointing Stick"
+ msgstr "指点杆"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:315
++#: panels/mouse/cc-mouse-panel.blp:356
+ msgid "Pointing Stick _Acceleration"
+ msgstr "指点杆加速(_A)"
+ 
+-#: panels/mouse/cc-mouse-panel.blp:323
++#: panels/mouse/cc-mouse-panel.blp:364
+ msgid ""
+ "Turning pointing stick acceleration off can allow faster and more precise "
+ "movements, but can also make the pointing stick more difficult to use."
+@@ -3107,7 +3139,7 @@
+ 
+ #. Translators: This is a password needed for printing.
+ #: panels/network/cc-qr-code-dialog.blp:64
+-#: panels/network/cc-wifi-hotspot-dialog.blp:79
++#: panels/network/cc-wifi-hotspot-dialog.blp:83
+ #: panels/printers/pp-jobs-dialog.blp:171
+ #: panels/printers/pp-new-printer-dialog.ui:300
+ #: panels/system/users/cc-add-user-dialog.blp:89
+@@ -3175,15 +3207,15 @@
+ "Wi-Fi 热点允许其他人通过创建他们可以连接的 Wi-Fi 网络来共享您的互联网连接。 "
+ "为此，您必须通过 Wi-Fi 以外的其它来源建立互联网连接。"
+ 
+-#: panels/network/cc-wifi-hotspot-dialog.blp:92
++#: panels/network/cc-wifi-hotspot-dialog.blp:96
+ msgid "Generate Random Password"
+ msgstr "生成随机密码"
+ 
+-#: panels/network/cc-wifi-hotspot-dialog.blp:93
++#: panels/network/cc-wifi-hotspot-dialog.blp:97
+ msgid "Autogenerate Password"
+ msgstr "自动生成密码"
+ 
+-#: panels/network/cc-wifi-hotspot-dialog.blp:128
++#: panels/network/cc-wifi-hotspot-dialog.blp:135
+ msgid "_Turn On"
+ msgstr "打开(_T)"
+ 
+@@ -4022,7 +4054,7 @@
+ msgstr "秒"
+ 
+ #: panels/network/connection-editor/wireguard-peer.blp:227
+-#: panels/universal-access/cc-ua-seeing-page.blp:115
++#: panels/universal-access/cc-ua-seeing-page.blp:109
+ msgid "Apply"
+ msgstr "应用"
+ 
+@@ -4886,68 +4918,68 @@
+ msgstr "禁用自动挂起会导致更高的能耗。推荐保持启用自动挂起。"
+ 
+ #. TRANSLATORS: This is the same title as the title from the .ui file, but without mnemonic
+-#: panels/power/cc-power-panel.c:211
++#: panels/power/cc-power-panel.c:228
+ msgid "Power Saving"
+ msgstr "节电"
+ 
+-#: panels/power/cc-power-panel.c:311
++#: panels/power/cc-power-panel.c:328
+ msgid "Battery Levels"
+ msgstr "电池电量"
+ 
+ #. Translators: UPS is an Uninterruptible Power Supply:
+ #. * https://en.wikipedia.org/wiki/Uninterruptible_power_supply
+-#: panels/power/cc-power-panel.c:316
++#: panels/power/cc-power-panel.c:333
+ msgid "UPS"
+ msgstr "UPS"
+ 
+-#: panels/power/cc-power-panel.c:319
++#: panels/power/cc-power-panel.c:336
+ msgid "Battery Level"
+ msgstr "电池电量"
+ 
+-#: panels/power/cc-power-panel.c:569
++#: panels/power/cc-power-panel.c:580
+ msgid "Suspend"
+ msgstr "挂起"
+ 
+-#: panels/power/cc-power-panel.c:570
++#: panels/power/cc-power-panel.c:581
+ msgid "Power Off"
+ msgstr "电源关闭"
+ 
+-#: panels/power/cc-power-panel.c:571
++#: panels/power/cc-power-panel.c:582
+ msgid "Hibernate"
+ msgstr "休眠"
+ 
+-#: panels/power/cc-power-panel.c:572
++#: panels/power/cc-power-panel.c:583
+ msgid "Nothing"
+ msgstr "不处理"
+ 
+-#: panels/power/cc-power-panel.c:877
++#: panels/power/cc-power-panel.c:967
+ msgid "Performance mode temporarily disabled due to high operating temperature"
+ msgstr "由于工作温度高已暂时禁用性能模式"
+ 
+-#: panels/power/cc-power-panel.c:879
++#: panels/power/cc-power-panel.c:969
+ msgid ""
+ "Lap detected: performance mode temporarily unavailable. Move the device to a "
+ "stable surface to restore."
+ msgstr "检测到膝上使用：性能模式暂时不可用。将设备移动到稳定的表面以恢复。"
+ 
+-#: panels/power/cc-power-panel.c:881
++#: panels/power/cc-power-panel.c:971
+ msgid "Performance mode temporarily disabled"
+ msgstr "性能模式已暂时禁用"
+ 
+-#: panels/power/cc-power-panel.c:923
++#: panels/power/cc-power-panel.c:1013
+ msgid ""
+ "Power saver enabled due to low battery. Previous mode will be restored when "
+ "battery is charged."
+ msgstr "由于电池电量低已启用节电模式。电池充满电时将恢复之前的模式。"
+ 
+ #. translators: "%s" is an application name
+-#: panels/power/cc-power-panel.c:931
++#: panels/power/cc-power-panel.c:1021
+ #, c-format
+ msgid "Power Saver mode activated by “%s”"
+ msgstr "节电模式已由“%s”激活"
+ 
+ #. translators: "%s" is an application name
+-#: panels/power/cc-power-panel.c:935
++#: panels/power/cc-power-panel.c:1025
+ #, c-format
+ msgid "Performance mode activated by “%s”"
+ msgstr "性能模式已由“%s”激活"
+@@ -8619,85 +8651,85 @@
+ msgid "Toggle reduced motion animations throughout the user interface"
+ msgstr "减少贯穿用户界面动画效果的切换开关"
+ 
+-#: panels/universal-access/cc-ua-seeing-page.blp:67
++#: panels/universal-access/cc-ua-seeing-page.blp:61
+ msgid "_Text Size"
+ msgstr "文字大小(_T)"
+ 
+-#: panels/universal-access/cc-ua-seeing-page.blp:74
++#: panels/universal-access/cc-ua-seeing-page.blp:68
+ msgid "_Cursor Size"
+ msgstr "指针大小(_C)"
+ 
+-#: panels/universal-access/cc-ua-seeing-page.blp:75
++#: panels/universal-access/cc-ua-seeing-page.blp:69
+ msgid "Increase the size of the cursor"
+ msgstr "增大指针大小"
+ 
+-#: panels/universal-access/cc-ua-seeing-page.blp:81
++#: panels/universal-access/cc-ua-seeing-page.blp:75
+ msgid "_Sound Keys"
+ msgstr "发声键(_S)"
+ 
+-#: panels/universal-access/cc-ua-seeing-page.blp:82
++#: panels/universal-access/cc-ua-seeing-page.blp:76
+ msgid "Beep when Num Lock or Caps Lock are turned on or off"
+ msgstr "数字键盘锁定或大小写锁定开启或关闭时发出蜂鸣声"
+ 
+-#: panels/universal-access/cc-ua-seeing-page.blp:87
++#: panels/universal-access/cc-ua-seeing-page.blp:81
+ msgid "Always Show Scroll_bars"
+ msgstr "始终显示滚动条(_B)"
+ 
+-#: panels/universal-access/cc-ua-seeing-page.blp:88
++#: panels/universal-access/cc-ua-seeing-page.blp:82
+ msgid "Make scrollbars always visible"
+ msgstr "使滚动条始终可见"
+ 
+-#: panels/universal-access/cc-ua-seeing-page.blp:97
++#: panels/universal-access/cc-ua-seeing-page.blp:91
+ msgid "Text Size"
+ msgstr "文字大小"
+ 
+-#: panels/universal-access/cc-ua-seeing-page.blp:109
++#: panels/universal-access/cc-ua-seeing-page.blp:103
+ #: panels/wwan/cc-wwan-device-page.c:191
+ msgid "Cancel"
+ msgstr "取消"
+ 
+-#: panels/universal-access/cc-ua-seeing-page.blp:125
++#: panels/universal-access/cc-ua-seeing-page.blp:119
+ msgid "Use the slider to adjust the size of user interface text"
+ msgstr "使用该滑块调节用户界面文字的大小"
+ 
+ #. Translators: Single letter next to the text size slider
+-#: panels/universal-access/cc-ua-seeing-page.blp:137
+-#: panels/universal-access/cc-ua-seeing-page.blp:157
++#: panels/universal-access/cc-ua-seeing-page.blp:131
++#: panels/universal-access/cc-ua-seeing-page.blp:151
+ msgid "A"
+ msgstr "A"
+ 
+-#: panels/universal-access/cc-ua-seeing-page.blp:168
++#: panels/universal-access/cc-ua-seeing-page.blp:162
+ msgid "Sample text"
+ msgstr "示例文本"
+ 
+ #. translators: the labels will read:
+ #. * Cursor Size: Default
+-#: panels/universal-access/cc-ua-seeing-page.c:215
++#: panels/universal-access/cc-ua-seeing-page.c:213
+ msgctxt "cursor size"
+ msgid "Default"
+ msgstr "默认"
+ 
+-#: panels/universal-access/cc-ua-seeing-page.c:218
++#: panels/universal-access/cc-ua-seeing-page.c:216
+ msgctxt "cursor size"
+ msgid "Medium"
+ msgstr "中"
+ 
+-#: panels/universal-access/cc-ua-seeing-page.c:221
++#: panels/universal-access/cc-ua-seeing-page.c:219
+ msgctxt "cursor size"
+ msgid "Large"
+ msgstr "大"
+ 
+-#: panels/universal-access/cc-ua-seeing-page.c:224
++#: panels/universal-access/cc-ua-seeing-page.c:222
+ msgctxt "cursor size"
+ msgid "Larger"
+ msgstr "更大"
+ 
+-#: panels/universal-access/cc-ua-seeing-page.c:227
++#: panels/universal-access/cc-ua-seeing-page.c:225
+ msgctxt "cursor size"
+ msgid "Largest"
+ msgstr "最大"
+ 
+-#: panels/universal-access/cc-ua-seeing-page.c:231
++#: panels/universal-access/cc-ua-seeing-page.c:229
+ #, c-format
+ msgid "%d pixel"
+ msgid_plural "%d pixels"
+@@ -8948,6 +8980,8 @@
+ #. Translators: This is a mark in the Contrast scale
+ #: panels/universal-access/cc-ua-zoom-page.blp:192
+ #: panels/universal-access/cc-ua-zoom-page.blp:216
++#: panels/mouse/cc-mouse-panel.blp:269
++#: panels/mouse/cc-mouse-panel.blp:303
+ msgid "Low"
+ msgstr "低"
+ 
+@@ -8955,6 +8989,8 @@
+ #. Translators: This is a mark in the Contrast scale
+ #: panels/universal-access/cc-ua-zoom-page.blp:194
+ #: panels/universal-access/cc-ua-zoom-page.blp:218
++#: panels/mouse/cc-mouse-panel.blp:271
++#: panels/mouse/cc-mouse-panel.blp:305
+ msgid "High"
+ msgstr "高"
+ 
+@@ -10106,16 +10142,17 @@
+ msgid "cellular;wwan;telephony;sim;mobile;"
+ msgstr "cellular;wwan;telephony;sim;mobile;蜂窝;移动;无线;"
+ 
+-#: shell/appdata/org.gnome.Settings.metainfo.xml.in.in:8
++#: shell/appdata/org.gnome.Settings.metainfo.xml.in.in:9
+ msgid "Utility to configure the GNOME desktop"
+ msgstr "用来配置 GNOME 桌面的工具"
+ 
+-#: shell/appdata/org.gnome.Settings.metainfo.xml.in.in:10
++#: shell/appdata/org.gnome.Settings.metainfo.xml.in.in:11
+ msgid "Settings is the primary interface for configuring your system."
+ msgstr "“设置”是配置您的系统的主要界面。"
+ 
+ #. developer_name tag deprecated with Appstream 1.0
+-#: shell/appdata/org.gnome.Settings.metainfo.xml.in.in:39
++#: shell/appdata/org.gnome.Settings.metainfo.xml.in.in:40
++#: shell/appdata/org.gnome.Settings.metainfo.xml.in.in:42
+ msgid "The GNOME Project"
+ msgstr "GNOME 项目"
+ 
+@@ -10300,7 +10337,7 @@
+ 
+ #. translators:
+ #. * The number of sound outputs on a particular device
+-#: subprojects/gvc/gvc-mixer-control.c:1917
++#: subprojects/gvc/gvc-mixer-control.c:1926
+ #, c-format
+ msgid "%u Output"
+ msgid_plural "%u Outputs"
+@@ -10308,16 +10345,45 @@
+ 
+ #. translators:
+ #. * The number of sound inputs on a particular device
+-#: subprojects/gvc/gvc-mixer-control.c:1927
++#: subprojects/gvc/gvc-mixer-control.c:1936
+ #, c-format
+ msgid "%u Input"
+ msgid_plural "%u Inputs"
+ msgstr[0] "%u 路输入"
+ 
+-#: subprojects/gvc/gvc-mixer-control.c:2910
++#: subprojects/gvc/gvc-mixer-control.c:2919
+ msgid "System Sounds"
+ msgstr "系统声音"
+ 
++#~ msgid "Adjust the force of the touchpad's haptic feedback."
++#~ msgstr "调整触摸板触觉反馈的力度。"
++
++#~ msgid "Connect a Sensel haptic touchpad to adjust haptic feedback."
++#~ msgstr "连接 Sensel 触觉触摸板以调节触觉反馈。"
++
++#~ msgid "11 fixed levels from 0 (off) to 10 (strongest)."
++#~ msgstr "从 0（关闭）到 10（最强）的 11 个固定档位。"
++
++#, c-format
++#~ msgid "Detected at %s. Move the slider to apply changes."
++#~ msgstr "已在 %s 检测到设备。移动滑块即可应用更改。"
++
++#, c-format
++#~ msgid "The Sensel helper is not installed at %s."
++#~ msgstr "Sensel 辅助程序未安装于 %s。"
++
++#, c-format
++#~ msgid "Could not start the privileged helper: %s"
++#~ msgstr "无法启动特权辅助程序：%s"
++
++#, c-format
++#~ msgid "Could not apply the setting: %s"
++#~ msgstr "无法应用设置：%s"
++
++#, c-format
++#~ msgid "Applied: %u%%."
++#~ msgstr "已应用：%u%%。"
++
+ #~ msgid "No saved networks"
+ #~ msgstr "无保存的网络"
+ 
+@@ -11251,10 +11317,6 @@
+ #~ msgid "This panel must be unlocked to change this setting"
+ #~ msgstr "该面板必须解锁才能更改设置"
+ 
+-#, c-format
+-#~ msgid "Could not load ui: %s"
+-#~ msgstr "无法载入界面：%s"
+-
+ #~ msgid "You cannot delete your own account."
+ #~ msgstr "不能删除自己的账号。"
+ 

@@ -1,0 +1,41 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+set -eu
+
+sdk="${SENSEL_GNOME_SDK_ROOT:-}"
+result="$(/usr/bin/pkg-config "$@")"
+
+rewrite_tool_path() {
+    if [ -z "$sdk" ]; then
+        printf '%s' "$1"
+        return
+    fi
+
+    case "$1" in
+        "${sdk}"/*) printf '%s' "$1" ;;
+        /usr/bin/*) printf '%s/%s' "$sdk" "${1#/usr/bin/}" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+case " $* " in
+    *" --variable=glib_mkenums "*)
+        printf '%s\n' "$(rewrite_tool_path "${result}")"
+        ;;
+    *" --variable=glib_genmarshal "*)
+        printf '%s\n' "$(rewrite_tool_path "${result}")"
+        ;;
+    *" --variable=gobject_query "*)
+        printf '%s\n' "$(rewrite_tool_path "${result}")"
+        ;;
+    *" --variable=glib_compile_resources "*)
+        printf '%s\n' "$(rewrite_tool_path "${result}")"
+        ;;
+    *" --variable=gdbus_codegen "*)
+        printf '%s\n' "$(rewrite_tool_path "${result}")"
+        ;;
+    *)
+        printf '%s\n' "${result}"
+        ;;
+esac
