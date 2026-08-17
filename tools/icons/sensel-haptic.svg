@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: GPL-2.0-or-later
+  Sensel Haptic Touchpad project icon: a touchpad surface with a
+  haptic ripple and the three TrackPoint-button zones.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1565d8"/>
+      <stop offset="1" stop-color="#0b3f8f"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#bg)"/>
+  <!-- touchpad surface -->
+  <rect x="24" y="34" width="80" height="52" rx="10" fill="#ffffff" fill-opacity="0.92"/>
+  <!-- haptic ripple rings -->
+  <circle cx="64" cy="60" r="5" fill="#1565d8"/>
+  <circle cx="64" cy="60" r="11" fill="none" stroke="#1565d8" stroke-width="2.5" opacity="0.75"/>
+  <circle cx="64" cy="60" r="17" fill="none" stroke="#1565d8" stroke-width="2.5" opacity="0.4"/>
+  <!-- three TrackPoint buttons -->
+  <rect x="24" y="92" width="24" height="12" rx="5" fill="#ffffff" fill-opacity="0.92"/>
+  <rect x="52" y="92" width="24" height="12" rx="5" fill="#ffffff" fill-opacity="0.92"/>
+  <rect x="80" y="92" width="24" height="12" rx="5" fill="#ffffff" fill-opacity="0.92"/>
+</svg>

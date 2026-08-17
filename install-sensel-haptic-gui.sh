@@ -33,11 +33,12 @@ install_translations() {
         -path "*/LC_MESSAGES/${TRANSLATION_DOMAIN}.po" -print0)
 }
 
-sudo install -d -m 0755 /usr/local/bin /usr/local/libexec /usr/share/applications /etc/polkit-1/rules.d
+sudo install -d -m 0755 /usr/local/bin /usr/local/libexec /usr/share/applications /usr/share/icons/hicolor/scalable/apps /etc/polkit-1/rules.d
 sudo install -o root -g root -m 0755 "${GUI_FILE}" /usr/local/bin/sensel-haptic-control
 sudo install -o root -g root -m 0755 "${HELPER_FILE}" /usr/local/libexec/sensel-haptic-set
 sudo install -o root -g root -m 0755 "${DAEMON_FILE}" /usr/local/libexec/sensel-haptic-daemon
 sudo install -o root -g root -m 0644 "${POLKIT_RULE_FILE}" /etc/polkit-1/rules.d/49-sensel-haptic.rules
+sudo install -o root -g root -m 0644 "${PROJECT_DIR}/tools/icons/sensel-haptic.svg" /usr/share/icons/hicolor/scalable/apps/sensel-haptic.svg
 sudo install -o root -g root -m 0644 "${GUI_DESKTOP_FILE}" /usr/share/applications/sensel-haptic-control.desktop
 install_translations
 sudo update-desktop-database /usr/share/applications 2>/dev/null || true
