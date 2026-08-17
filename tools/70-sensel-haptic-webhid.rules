@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Grants desktop-session users direct WebHID access to the Sensel haptic
+# touchpad so tools/sensel-haptic-web.html can open it from Chromium
+# without the root helper.  The root-owned helper chain is unaffected.
+#
+# The device is an I2C-HID touchpad: the sysfs tree has no idVendor/
+# idProduct attributes (those exist only on USB HID), so match the HID
+# bus modalias instead — bus 0018 (I2C), vendor 2C2F, product 0028.
+# USB-attached units of the same VID/PID (bus 0003) are covered too.
+#
+# Install:
+#   sudo cp tools/70-sensel-haptic-webhid.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger
+ENV{MODALIAS}=="hid:b0018g0004v00002C2F*", TAG+="uaccess"
+ENV{MODALIAS}=="hid:b0003g0004v00002C2F*", TAG+="uaccess"
+SUBSYSTEM=="hidraw", KERNELS=="0018:2C2F:0028.*", TAG+="uaccess"
+SUBSYSTEM=="hidraw", KERNELS=="0003:2C2F:0028.*", TAG+="uaccess"

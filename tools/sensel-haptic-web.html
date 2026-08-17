@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sensel Haptic Touchpad</title>
+<!--
+  SPDX-License-Identifier: GPL-2.0-or-later
+
+  Standalone WebHID control panel for the Sensel haptic touchpad
+  (VID/PID 2C2F:0028).  Single file, no dependencies, no server.
+
+  Works in any Chromium browser (Chrome / Edge / Opera) on Windows,
+  macOS, Linux and ChromeOS.  Open this file directly (file:// is a
+  secure context) or serve it from localhost/HTTPS.
+
+  Linux note: the hidraw node is root-only by default, so Chrome cannot
+  open it until a udev rule grants the user access, e.g.
+
+    SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2c2f", ATTRS{idProduct}=="0028", MODE="0660", TAG+="uaccess"
+
+  saved as /etc/udev/rules.d/60-sensel-haptic.rules, then run
+  "sudo udevadm control --reload && sudo udevadm trigger".
+
+  The register protocol mirrors scripts/sensel-haptic-daemon: 20-byte
+  report-ID-9 feature reports carrying framed register commands.  Saves
+  (UserSetting) open a ~2.6 s flash-busy window; every pipe operation
+  retries once or twice across it.
+-->
+<style>
+:root {
+  --fg: #1c2430; --fg-dim: #5b6672; --line: #d8dde3;
+  --accent: #0b62c4; --ok: #2e7d32; --warn: #b35000; --err: #b3261e;
+  --bg: #f5f6f8; --card: #ffffff;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 24px; background: var(--bg); color: var(--fg);
+  font: 14px/1.55 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+.wrap { max-width: 780px; margin: 0 auto; }
+h1 { font-size: 22px; margin: 0 0 2px; }
+h2 { font-size: 15px; margin: 0 0 10px; }
+.sub { color: var(--fg-dim); margin: 0 0 18px; }
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  padding: 14px 16px; margin-bottom: 14px;
+}
+.row { display: flex; align-items: center; gap: 12px; }
+.row + .row { margin-top: 10px; }
+.grow { flex: 1; }
+input[type=range] { width: 100%; accent-color: var(--accent); }
+.val {
+  min-width: 44px; text-align: center; font-variant-numeric: tabular-nums;
+  border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px;
+  background: var(--card);
+}
+.dim { color: var(--fg-dim); font-size: 12.5px; }
+.scale-row { display: grid; grid-template-columns: 1fr 52px; gap: 10px; align-items: center; }
+.scale-row .end { font-size: 11px; color: var(--fg-dim); }
+button {
+  font: inherit; border: 1px solid var(--line); border-radius: 8px;
+  padding: 7px 16px; background: var(--card); color: var(--fg); cursor: pointer;
+}
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button:disabled { opacity: .45; cursor: default; }
+.status { min-height: 20px; margin-top: 4px; }
+.status.ok { color: var(--ok); } .status.warn { color: var(--warn); } .status.err { color: var(--err); }
+.dirty { font-weight: 600; }
+.dirty.on { color: var(--warn); } .dirty.off { color: var(--ok); }
+select { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; max-width: 380px; }
+label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
+label.chk input { accent-color: var(--accent); width: 16px; height: 16px; }
+#connect-zone { text-align: center; padding: 30px 0 10px; }
+#connect-zone button { font-size: 16px; padding: 10px 26px; }
+.actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.actions .grow { flex: 1; }
+.hidden { display: none; }
+kbd { background:#eef1f4; border:1px solid var(--line); border-radius:4px; padding:0 5px; font-size:12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1 data-i>Sensel 触觉触摸板</h1>
+  <p class="sub" data-i>WebHID 跨平台控制面板 — 改动即时预览，统一保存</p>
+
+  <div id="connect-zone">
+    <p id="no-webhid" class="status warn hidden" data-i>
+      此浏览器不支持 WebHID。请使用 Chrome / Edge / Opera（Chromium 内核）打开本页。
+    </p>
+    <button id="connect-btn" class="primary" data-i>连接触摸板</button>
+    <p class="dim" data-i>仅请求 Sensel 触摸板（2C2F:0028）的访问权。</p>
+  </div>
+
+  <div id="app" class="hidden">
+    <div class="card">
+      <div class="row">
+        <span id="dev-label" data-i>设备</span>
+        <span id="dev-name" class="grow dim"></span>
+        <button id="forget-btn" data-i>断开</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 data-i>触觉反馈</h2>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="haptic-on">
+          <span data-i>启用触觉反馈</span></label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 data-i>触觉强度</h2>
+      <div class="scale-row">
+        <input type="range" id="intensity" min="1" max="10" step="1" value="5">
+        <span class="val" id="intensity-v">5</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 data-i>点击力度</h2>
+      <p class="dim" data-i>主点击按下寄存器 1–255。Windows 预设：60 / 82 / 95（120 / 164 / 190 Gf）。</p>
+      <div class="scale-row">
+        <div>
+          <input type="range" id="click-force" min="1" max="255" step="1" value="60">
+          <div class="row" style="justify-content:space-between"><span class="end">1</span><span class="end">255</span></div>
+        </div>
+        <span class="val" id="click-force-v">60</span>
+      </div>
+      <p class="dim" data-i>释放比值：抬起触发力度为按下力度的百分比（Windows 默认 65）。</p>
+      <div class="scale-row">
+        <div>
+          <input type="range" id="click-ratio" min="5" max="100" step="1" value="65">
+          <div class="row" style="justify-content:space-between"><span class="end">5%</span><span class="end">100%</span></div>
+        </div>
+        <span class="val" id="click-ratio-v">65</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 data-i>TrackPoint 按钮</h2>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="tp-on">
+          <span data-i>启用 TrackPoint 按钮</span></label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 data-i>TrackPoint 点击力度</h2>
+      <p class="dim" data-i>3HB 寄存器单位 1–255。Windows 预设：28 / 38 / 60。</p>
+      <div class="scale-row">
+        <div>
+          <input type="range" id="tp-force" min="1" max="255" step="1" value="38">
+          <div class="row" style="justify-content:space-between"><span class="end">1</span><span class="end">255</span></div>
+        </div>
+        <span class="val" id="tp-force-v">38</span>
+      </div>
+      <p class="dim" data-i>释放比值：抬起触发力度为按下力度的百分比（Windows 默认 65）。</p>
+      <div class="scale-row">
+        <div>
+          <input type="range" id="tp-ratio" min="5" max="100" step="1" value="65">
+          <div class="row" style="justify-content:space-between"><span class="end">5%</span><span class="end">100%</span></div>
+        </div>
+        <span class="val" id="tp-ratio-v">65</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 data-i>待保存的更改</h2>
+      <div class="actions">
+        <span id="dirty" class="dirty off" data-i>● 所有更改已保存</span>
+        <span class="grow"></span>
+        <button id="save-btn" class="primary" data-i>保存</button>
+        <button id="cancel-btn" data-i>取消</button>
+        <button id="reset-btn" data-i>恢复默认</button>
+      </div>
+      <p class="dim" data-i>保存期间触摸板会短暂无响应（每个寄存器约 2.6 秒）。</p>
+    </div>
+
+    <p class="status" id="status"></p>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ================= protocol constants (mirror the daemon) ================= */
+const PIPE_REPORT_ID = 0x09;       // WebHID payload excludes the report ID
+const PIPE_PAYLOAD_MAX = 19;       // 20-byte report minus len byte
+const READ_ACK = 0x01, WRITE_ACK = 0x05;
+const SAVE_REGISTER = 0x0230, USER_SETTING_ATTRIBUTE = 0x4000;
+const REG = {
+  CLICK_DOWN: 0x0038, CLICK_UP: 0x0090,
+  TP_L_DOWN: 0x0091, TP_L_UP: 0x0092,
+  TP_R_DOWN: 0x0093, TP_R_UP: 0x0094,
+  TP_M_DOWN: 0x0095, TP_M_UP: 0x0096,
+  TP_BUTTONS: 0x008A, INTENSITY: 0x00AB,
+};
+const BUSY_RETRIES = 3, BUSY_RETRY_DELAY_MS = 1500;
+const INTENSITY_LEVELS = [32, 45, 55, 63, 71, 77, 84, 89, 95, 100];
+const RESET_PRESET = { intensity: 100, clickForce: 60, clickRatio: 65,
+                       tpForce: 120, tpRatio: 65, tpButtons: true };
+const VENDOR_ID = 0x2c2f, PRODUCT_ID = 0x0028;
+
+/* ================= i18n ================= */
+const STR = {
+  zh: {
+    title: "Sensel 触觉触摸板", sub: "WebHID 跨平台控制面板 — 改动即时预览，统一保存",
+    connect: "连接触摸板", connectHint: "仅请求 Sensel 触摸板（2C2F:0028）的访问权。",
+    noWebHID: "此浏览器不支持 WebHID。请使用 Chrome / Edge / Opera（Chromium 内核）打开本页。",
+    device: "设备", disconnect: "断开",
+    haptic: "触觉反馈", hapticOn: "启用触觉反馈",
+    intensity: "触觉强度",
+    click: "点击力度",
+    clickHint: "主点击按下寄存器 1–255。Windows 预设：60 / 82 / 95（120 / 164 / 190 Gf）。",
+    ratioHint: "释放比值：抬起触发力度为按下力度的百分比（Windows 默认 65）。",
+    tpButtons: "TrackPoint 按钮", tpOn: "启用 TrackPoint 按钮",
+    tpForce: "TrackPoint 点击力度",
+    tpForceHint: "3HB 寄存器单位 1–255。Windows 预设：28 / 38 / 60。",
+    pending: "待保存的更改", dirtyOn: "● 有未保存的更改", dirtyOff: "● 所有更改已保存",
+    save: "保存", cancel: "取消", reset: "恢复默认",
+    saveHint: "保存期间触摸板会短暂无响应（每个寄存器约 2.6 秒）。",
+    reading: "正在读取设备设置…", readFail: "读取失败：", applyFail: "操作失败：",
+    previewing: "已预览，点“保存”才会写入。", savedAll: "所有更改已保存到设备。",
+    saving: (i, n, l) => `正在保存 ${i}/${n}：${l}…`, saveItemFail: (l) => `保存${l}失败：`,
+    cancelled: "已放弃更改；设备保留已保存的设置。", resetDone: "默认预设已载入为草稿。点“保存”才会写入。",
+    devLost: "设备已断开，请重新连接。",
+    lblIntensity: "触觉强度", lblClick: "点击力度", lblTp: "TrackPoint 点击力度", lblBtn: "TrackPoint 按钮",
+  },
+  en: {
+    title: "Sensel Haptic Touchpad", sub: "WebHID cross-platform panel — instant preview, unified save",
+    connect: "Connect touchpad", connectHint: "Requests access to the Sensel touchpad (2C2F:0028) only.",
+    noWebHID: "WebHID is not available in this browser. Use Chrome / Edge / Opera (Chromium).",
+    device: "Device", disconnect: "Disconnect",
+    haptic: "Haptic Feedback", hapticOn: "Enable Haptic Feedback",
+    intensity: "Haptics Intensity",
+    click: "Click Force",
+    clickHint: "Main click register 1–255. Windows presets: 60 / 82 / 95 (120 / 164 / 190 Gf).",
+    ratioHint: "Release ratio: percent of the press force that releases the click (Windows default 65).",
+    tpButtons: "TrackPoint Buttons", tpOn: "Enable TrackPoint Buttons",
+    tpForce: "TrackPoint Click Force",
+    tpForceHint: "3HB register units 1–255. Windows presets: 28 / 38 / 60.",
+    pending: "Pending Changes", dirtyOn: "● You have unsaved changes", dirtyOff: "● All changes saved",
+    save: "Save", cancel: "Cancel", reset: "Reset to Defaults",
+    saveHint: "The touchpad is briefly unresponsive while saving (~2.6 s per register).",
+    reading: "Reading settings from the device…", readFail: "Read failed: ", applyFail: "Operation failed: ",
+    previewing: "Previewed — press Save to keep it.", savedAll: "All changes saved to the device.",
+    saving: (i, n, l) => `Saving ${i}/${n}: ${l}…`, saveItemFail: (l) => `Saving ${l} failed: `,
+    cancelled: "Changes discarded; the device keeps its saved settings.", resetDone: "Default preset loaded as a draft. Press Save to keep it.",
+    devLost: "Device disconnected — reconnect.",
+    lblIntensity: "Haptics Intensity", lblClick: "Click Force", lblTp: "TrackPoint Click Force", lblBtn: "TrackPoint Buttons",
+  },
+};
+function lang() {
+  const n = navigator.language || "en";
+  return n.toLowerCase().startsWith("zh") ? STR.zh : STR.en;
+}
+function applyI18n() {
+  const t = lang();
+  // The static markup already carries Chinese; swap texts for English locale.
+  if (t === STR.en) {
+    const set = (sel, v) => { const e = document.querySelector(sel); if (e) e.textContent = v; };
+    set("h1", t.title); set(".sub", t.sub); set("#connect-btn", t.connect);
+    set("#no-webhid", t.noWebHID);
+    const hint = document.querySelector("#connect-zone .dim");
+    if (hint) hint.textContent = t.connectHint;
+    set("#dev-label", t.device + ":"); set("#forget-btn", t.disconnect);
+    document.querySelectorAll("h2").forEach(h => {
+      const m = { "触觉反馈": t.haptic, "触觉强度": t.intensity, "点击力度": t.click,
+                  "TrackPoint 按钮": t.tpButtons, "TrackPoint 点击力度": t.tpForce,
+                  "待保存的更改": t.pending };
+      if (m[h.textContent]) h.textContent = m[h.textContent];
+    });
+    document.querySelectorAll(".dim").forEach(p => {
+      const m = { "主点击按下寄存器 1–255。Windows 预设：60 / 82 / 95（120 / 164 / 190 Gf）。": t.clickHint,
+                  "释放比值：抬起触发力度为按下力度的百分比（Windows 默认 65）。": t.ratioHint,
+                  "3HB 寄存器单位 1–255。Windows 预设：28 / 38 / 60。": t.tpForceHint,
+                  "保存期间触摸板会短暂无响应（每个寄存器约 2.6 秒）。": t.saveHint };
+      if (m[p.textContent]) p.textContent = m[p.textContent];
+    });
+    document.querySelector('label.chk span[data-i="启用触觉反馈"]').textContent = t.hapticOn;
+    document.querySelector('label.chk span[data-i="启用 TrackPoint 按钮"]').textContent = t.tpOn;
+    set("#save-btn", t.save); set("#cancel-btn", t.cancel); set("#reset-btn", t.reset);
+    set("#dirty", ui.dirty ? t.dirtyOn : t.dirtyOff);
+  }
+}
+
+/* ================= WebHID device ================= */
+class SenselPipe {
+  constructor(device) {
+    this.device = device;
+    this.rx = [];            // decoded payload bytes
+    this.waiters = [];       // pending inputreport resolvers
+    this.timeoutMs = 2500;
+    this.handler = (ev) => {
+      if (ev.reportId !== PIPE_REPORT_ID) return;
+      const d = ev.data;
+      if (d.byteLength < 2) return;
+      const count = d.getUint8(0);
+      if (count === 0 || count > PIPE_PAYLOAD_MAX || d.byteLength < 1 + count) return;
+      const chunk = [];
+      for (let i = 1; i <= count; i++) chunk.push(d.getUint8(i));
+      const w = this.waiters.shift();
+      if (w) w(chunk); else this.rx.push(...chunk);
+    };
+    device.addEventListener("inputreport", this.handler);
+  }
+  close() {
+    this.device.removeEventListener("inputreport", this.handler);
+    this.waiters.forEach(w => w(null));
+    this.waiters = [];
+  }
+  _nextPayload() {
+    if (this.rx.length) return Promise.resolve(this.rx.splice(0));
+    return new Promise(resolve => {
+      const timer = setTimeout(() => {
+        const i = this.waiters.indexOf(resolveFn);
+        if (i >= 0) this.waiters.splice(i, 1);
+        resolve(null);
+      }, this.timeoutMs);
+      const resolveFn = (chunk) => { clearTimeout(timer); resolve(chunk); };
+      this.waiters.push(resolveFn);
+    });
+  }
+  async _receive(n) {
+    while (this.rx.length < n) {
+      const chunk = await this._nextPayload();
+      if (!chunk) throw new Error("timeout waiting for Sensel pipe response");
+      this.rx.push(...chunk);
+    }
+    return this.rx.splice(0, n);
+  }
+  async _sendPayload(payload) {
+    for (let start = 0; start < payload.length; start += PIPE_PAYLOAD_MAX) {
+      const chunk = payload.slice(start, start + PIPE_PAYLOAD_MAX);
+      const report = new Uint8Array(1 + chunk.length);
+      report[0] = chunk.length;
+      report.set(chunk, 1);
+      await this.device.sendReport(PIPE_REPORT_ID, report);
+    }
+  }
+  static command(isRead, address, size) {
+    let first = ((address & 0x3f00) >> 7) | 0x01;
+    if (isRead) first |= 0x80;
+    return [first, address & 0xff, size];
+  }
+  async readRegister(address, size) {
+    let lastErr = null;
+    for (let attempt = 0; attempt < BUSY_RETRIES; attempt++) {
+      try { return await this._readOnce(address, size); }
+      catch (e) { lastErr = e; await sleep(BUSY_RETRY_DELAY_MS); }
+    }
+    throw lastErr;
+  }
+  async _readOnce(address, size) {
+    this.rx.length = 0;
+    await this._sendPayload(SenselPipe.command(true, address, size));
+    if ((await this._receive(1))[0] !== READ_ACK) throw new Error("device rejected register read");
+    await this._receive(1);                       // status
+    const sizeBytes = await this._receive(2);     // little-endian u16
+    const reported = sizeBytes[0] | (sizeBytes[1] << 8);
+    if (reported !== size) throw new Error(`read size mismatch: requested ${size}, got ${reported}`);
+    const data = await this._receive(size);
+    const checksum = (await this._receive(1))[0];
+    if ((data.reduce((a, b) => a + b, 0) & 0xff) !== checksum)
+      throw new Error("register read checksum mismatch");
+    return data;
+  }
+  async writeRegister(address, data, persist = false) {
+    let lastErr = null;
+    for (let attempt = 0; attempt < BUSY_RETRIES; attempt++) {
+      try { return await this._writeOnce(address, data, persist); }
+      catch (e) { lastErr = e; await sleep(BUSY_RETRY_DELAY_MS); }
+    }
+    throw lastErr;
+  }
+  async _writeOnce(address, data, persist) {
+    this.rx.length = 0;
+    const packet = SenselPipe.command(false, address, data.length)
+      .concat(Array.from(data), [data.reduce((a, b) => a + b, 0) & 0xff]);
+    await this._sendPayload(packet);
+    if ((await this._receive(1))[0] !== WRITE_ACK) throw new Error("device rejected register write");
+    await this._receive(1);                       // status
+    if (persist) await this.saveRegister(address);
+  }
+  async saveRegister(address) {
+    const record = [address & 0xff, address >> 8,
+                    USER_SETTING_ATTRIBUTE & 0xff, USER_SETTING_ATTRIBUTE >> 8, 0x51];
+    await this._writeOnce(SAVE_REGISTER, record, false);
+  }
+}
+
+/* ================= register-level helpers ================= */
+const releaseForce = (down, ratioPct) =>
+  Math.max(1, Math.min(255, Math.round(down * ratioPct / 100)));
+const ratioFromRegisters = (down, up) =>
+  down <= 0 ? 65 : Math.max(5, Math.min(100, Math.round(up * 100 / down)));
+const levelToRaw = lv => INTENSITY_LEVELS[lv - 1];
+const rawToLevel = raw => raw <= 0 ? 5 :
+  INTENSITY_LEVELS.findIndex(v => v >= raw) + 1 || 10;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function readState(pipe) {
+  const inten = (await pipe.readRegister(REG.INTENSITY, 1))[0];
+  const cd = (await pipe.readRegister(REG.CLICK_DOWN, 1))[0];
+  const cu = (await pipe.readRegister(REG.CLICK_UP, 1))[0];
+  const td = (await pipe.readRegister(REG.TP_L_DOWN, 1))[0];
+  const tu = (await pipe.readRegister(REG.TP_L_UP, 1))[0];
+  const btn = (await pipe.readRegister(REG.TP_BUTTONS, 1))[0];
+  return {
+    intensity: inten,
+    clickForce: cd, clickRatio: ratioFromRegisters(cd, cu),
+    tpForce: td, tpRatio: ratioFromRegisters(td, tu),
+    tpButtons: !!btn,
+  };
+}
+async function previewClickForce(pipe, down, ratio) {
+  await pipe.writeRegister(REG.CLICK_DOWN, [down], false);
+  await pipe.writeRegister(REG.CLICK_UP, [releaseForce(down, ratio)], false);
+}
+async function commitClickForce(pipe, down, ratio) {
+  await pipe.writeRegister(REG.CLICK_DOWN, [down], true);
+  await pipe.writeRegister(REG.CLICK_UP, [releaseForce(down, ratio)], true);
+}
+async function previewTpForce(pipe, down, ratio) {
+  for (const [d, u] of [[REG.TP_L_DOWN, REG.TP_L_UP], [REG.TP_R_DOWN, REG.TP_R_UP],
+                         [REG.TP_M_DOWN, REG.TP_M_UP]]) {
+    await pipe.writeRegister(d, [down], false);
+    await pipe.writeRegister(u, [releaseForce(down, ratio)], false);
+  }
+}
+async function commitTpForce(pipe, down, ratio) {
+  for (const [d, u] of [[REG.TP_L_DOWN, REG.TP_L_UP], [REG.TP_R_DOWN, REG.TP_R_UP],
+                         [REG.TP_M_DOWN, REG.TP_M_UP]]) {
+    await pipe.writeRegister(d, [down], true);    // write→save per register
+    await pipe.writeRegister(u, [releaseForce(down, ratio)], true);
+  }
+}
+
+/* ================= UI state ================= */
+const $ = id => document.getElementById(id);
+const ui = {
+  device: null, pipe: null,
+  loaded: false, saving: false, syncing: false,
+  saved: null,   // last committed/saved draft (mirrors device flash+RAM)
+  dirty: false,
+};
+const t = () => lang();
+
+function currentDraft() {
+  const enabled = $("haptic-on").checked;
+  return {
+    intensity: enabled ? levelToRaw(+$("intensity").value) : 0,
+    clickForce: +$("click-force").value, clickRatio: +$("click-ratio").value,
+    tpForce: +$("tp-force").value, tpRatio: +$("tp-ratio").value,
+    tpButtons: $("tp-on").checked,
+  };
+}
+const sameDraft = (a, b) =>
+  a.intensity === b.intensity && a.clickForce === b.clickForce &&
+  a.clickRatio === b.clickRatio && a.tpForce === b.tpForce &&
+  a.tpRatio === b.tpRatio && a.tpButtons === b.tpButtons;
+
+function setStatus(msg, cls = "") {
+  const el = $("status");
+  el.textContent = msg; el.className = "status " + cls;
+}
+function refreshDirty() {
+  ui.dirty = ui.loaded && !ui.saving && !sameDraft(currentDraft(), ui.saved);
+  $("dirty").textContent = ui.dirty ? t().dirtyOn : t().dirtyOff;
+  $("dirty").className = "dirty " + (ui.dirty ? "on" : "off");
+  $("save-btn").disabled = !ui.dirty || ui.saving;
+  $("cancel-btn").disabled = !ui.dirty || ui.saving;
+}
+function setControls(on) {
+  for (const id of ["intensity", "click-force", "click-ratio", "tp-force", "tp-ratio",
+                    "haptic-on", "tp-on"]) $(id).disabled = !on;
+}
+
+/* connect / disconnect -------------------------------------------------- */
+$("connect-btn").onclick = async () => {
+  try {
+    const devices = await navigator.hid.requestDevice({
+      filters: [{ vendorId: VENDOR_ID, productId: PRODUCT_ID }],
+    });
+    if (!devices.length) return;
+    await openDevice(devices[0]);
+  } catch (e) {
+    setStatus(t().applyFail + e.message, "err");
+  }
+};
+async function openDevice(device) {
+  if (!device.opened) await device.open();
+  ui.device = device;
+  ui.pipe = new SenselPipe(device);
+  $("connect-zone").classList.add("hidden");
+  $("app").classList.remove("hidden");
+  $("dev-name").textContent =
+    `${device.productName || "Sensel"} (2C2F:0028)`;
+  device.addEventListener("disconnect", onDevLost);
+  setStatus(t().reading);
+  try {
+    ui.saved = await readState(ui.pipe);
+  } catch (e) {
+    setStatus(t().readFail + e.message, "err");
+    return;
+  }
+  applyState(ui.saved);
+  ui.loaded = true;
+  setControls(true);
+  refreshDirty();
+  setStatus(t().previewing, "ok");
+}
+function onDevLost(ev) {
+  if (ui.device && ev.device !== ui.device) return;
+  ui.device = null; ui.pipe?.close(); ui.pipe = null;
+  ui.loaded = false; ui.saving = false;
+  setControls(false);
+  $("app").classList.add("hidden");
+  $("connect-zone").classList.remove("hidden");
+  setStatus(t().devLost, "warn");
+}
+$("forget-btn").onclick = async () => {
+  try { ui.pipe?.close(); if (ui.device?.opened) await ui.device.close(); } catch {}
+  ui.device = null; ui.pipe = null; ui.loaded = false;
+  $("app").classList.add("hidden");
+  $("connect-zone").classList.remove("hidden");
+};
+
+function applyState(s) {
+  ui.syncing = true;
+  $("haptic-on").checked = s.intensity > 0;
+  $("intensity").value = s.intensity > 0 ? rawToLevel(s.intensity) : rawToLevel(0);
+  $("intensity-v").textContent = $("intensity").value;
+  $("click-force").value = s.clickForce; $("click-force-v").textContent = s.clickForce;
+  $("click-ratio").value = s.clickRatio; $("click-ratio-v").textContent = s.clickRatio + "%";
+  $("tp-on").checked = s.tpButtons;
+  $("tp-force").value = s.tpForce; $("tp-force-v").textContent = s.tpForce;
+  $("tp-ratio").value = s.tpRatio; $("tp-ratio-v").textContent = s.tpRatio + "%";
+  ui.syncing = false;
+}
+
+/* preview handlers ------------------------------------------------------ */
+async function safePreview(fn) {
+  if (!ui.loaded || ui.syncing || ui.saving) return;
+  refreshDirty();
+  if (!ui.dirty) return;
+  try {
+    await fn();
+    setStatus(t().previewing);
+  } catch (e) {
+    setStatus(t().applyFail + e.message, "err");
+  }
+}
+$("intensity").oninput = () => { $("intensity-v").textContent = $("intensity").value; };
+$("intensity").onchange = () => safePreview(() => {
+  const raw = $("haptic-on").checked ? levelToRaw(+$("intensity").value) : 0;
+  return ui.pipe.writeRegister(REG.INTENSITY, [raw], false);
+});
+$("haptic-on").onchange = () => safePreview(() =>
+  ui.pipe.writeRegister(REG.INTENSITY,
+    [$("haptic-on").checked ? levelToRaw(+$("intensity").value) : 0], false));
+$("click-force").oninput = () => { $("click-force-v").textContent = $("click-force").value; };
+$("click-force").onchange = () => safePreview(() =>
+  previewClickForce(ui.pipe, +$("click-force").value, +$("click-ratio").value));
+$("click-ratio").oninput = () => { $("click-ratio-v").textContent = $("click-ratio").value + "%"; };
+$("click-ratio").onchange = () => safePreview(() =>
+  previewClickForce(ui.pipe, +$("click-force").value, +$("click-ratio").value));
+$("tp-on").onchange = () => safePreview(() =>
+  ui.pipe.writeRegister(REG.TP_BUTTONS, [$("tp-on").checked ? 1 : 0], false));
+$("tp-force").oninput = () => { $("tp-force-v").textContent = $("tp-force").value; };
+$("tp-force").onchange = () => safePreview(() =>
+  previewTpForce(ui.pipe, +$("tp-force").value, +$("tp-ratio").value));
+$("tp-ratio").oninput = () => { $("tp-ratio-v").textContent = $("tp-ratio").value + "%"; };
+$("tp-ratio").onchange = () => safePreview(() =>
+  previewTpForce(ui.pipe, +$("tp-force").value, +$("tp-ratio").value));
+
+/* save / cancel / reset -------------------------------------------------- */
+$("save-btn").onclick = async () => {
+  if (!ui.dirty || ui.saving) return;
+  const draft = currentDraft();
+  const ops = [];
+  if (draft.intensity !== ui.saved.intensity)
+    ops.push([t().lblIntensity, () => ui.pipe.writeRegister(REG.INTENSITY, [draft.intensity], true)]);
+  if (draft.clickForce !== ui.saved.clickForce || draft.clickRatio !== ui.saved.clickRatio)
+    ops.push([t().lblClick, () => commitClickForce(ui.pipe, draft.clickForce, draft.clickRatio)]);
+  if (draft.tpForce !== ui.saved.tpForce || draft.tpRatio !== ui.saved.tpRatio)
+    ops.push([t().lblTp, () => commitTpForce(ui.pipe, draft.tpForce, draft.tpRatio)]);
+  if (draft.tpButtons !== ui.saved.tpButtons)
+    ops.push([t().lblBtn, () => ui.pipe.writeRegister(REG.TP_BUTTONS, [draft.tpButtons ? 1 : 0], true)]);
+  if (!ops.length) { refreshDirty(); return; }
+
+  ui.saving = true; setControls(false); refreshDirty();
+  for (let i = 0; i < ops.length; i++) {
+    setStatus(t().saving(i + 1, ops.length, ops[i][0]));
+    try { await ops[i][1](); }
+    catch (e) {
+      ui.saving = false;
+      setStatus(t().saveItemFail(ops[i][0]) + e.message, "err");
+      try { ui.saved = await readState(ui.pipe); applyState(ui.saved); }
+      catch { onDevLost({ device: ui.device }); }
+      setControls(true); refreshDirty();
+      return;
+    }
+  }
+  ui.saved = draft;
+  ui.saving = false; setControls(true); refreshDirty();
+  setStatus(t().savedAll, "ok");
+};
+
+$("cancel-btn").onclick = async () => {
+  if (!ui.dirty || ui.saving) return;
+  applyState(ui.saved);
+  ui.saving = false;
+  try {
+    await ui.pipe.writeRegister(REG.INTENSITY, [ui.saved.intensity], false);
+    await previewClickForce(ui.pipe, ui.saved.clickForce, ui.saved.clickRatio);
+    await previewTpForce(ui.pipe, ui.saved.tpForce, ui.saved.tpRatio);
+    await ui.pipe.writeRegister(REG.TP_BUTTONS, [ui.saved.tpButtons ? 1 : 0], false);
+  } catch (e) { setStatus(t().applyFail + e.message, "err"); }
+  refreshDirty();
+  setStatus(t().cancelled);
+};
+
+$("reset-btn").onclick = () => safePreview(async () => {
+  applyState(RESET_PRESET);
+  const p = RESET_PRESET;
+  await ui.pipe.writeRegister(REG.INTENSITY, [p.intensity], false);
+  await previewClickForce(ui.pipe, p.clickForce, p.clickRatio);
+  await previewTpForce(ui.pipe, p.tpForce, p.tpRatio);
+  await ui.pipe.writeRegister(REG.TP_BUTTONS, [p.tpButtons ? 1 : 0], false);
+});
+
+/* boot ------------------------------------------------------------------- */
+if (!navigator.hid) {
+  $("no-webhid").classList.remove("hidden");
+  $("connect-btn").disabled = true;
+}
+applyI18n();
+setStatus("");
+</script>
+</body>
+</html>

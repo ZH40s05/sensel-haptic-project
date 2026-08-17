@@ -35,6 +35,12 @@ python3 -m unittest discover \
     --pattern 'test_*.py' \
     --top-level-directory .
 
+if command -v node >/dev/null 2>&1; then
+    node tests/test_webhid_protocol.mjs >/dev/null
+else
+    echo "warning: node not installed; WebHID protocol checks skipped" >&2
+fi
+
 if command -v msgfmt >/dev/null 2>&1; then
     while IFS= read -r -d '' po_file; do
         msgfmt --check --check-format -o /dev/null "${po_file}"

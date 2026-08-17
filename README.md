@@ -20,6 +20,7 @@ GNOME Settings integration for Fedora.
 - 按比值（5%–100%）调节释放（抬起）触发力度，Windows 固定 65%。
 - 启用或禁用 TrackPoint 按钮。
 - 草稿式编辑：所有改动先以 RAM 预览即时生效，统一"保存/取消/重置"，避免每次调节都写 flash 造成 2–3 秒卡顿。
+- WebHID 单文件网页版（`tools/sensel-haptic-web.html`）：Chromium 系浏览器跨平台直连设备，功能与桌面版一致。
 - 独立 GUI 与 GNOME 设置共用同一 root 特权 helper。
 - 附带简体中文与繁体中文翻译。
 - 寄存器校验与设备识别全部收在特权 helper 内。
@@ -33,6 +34,9 @@ GNOME Settings integration for Fedora.
 - Draft editing: every change is previewed to RAM instantly, with global
   Save / Cancel / Reset, so adjustments no longer write flash and stall the
   touchpad for 2–3 seconds each time.
+- Single-file WebHID web panel (`tools/sensel-haptic-web.html`): talks to
+  the device directly from any Chromium browser with feature parity to
+  the desktop panel.
 - The standalone GUI and GNOME Settings share the same root-owned helper.
 - Simplified and Traditional Chinese translations are included.
 - Register validation and device identification stay inside the privileged
@@ -64,6 +68,29 @@ installer can install the known Fedora build dependencies, but the exact
 package set depends on the installed Fedora release.
 
 ## 安装 / Installation
+
+### WebHID 跨平台面板（推荐，无需安装）/ WebHID cross-platform panel (no install)
+
+用 Chromium 系浏览器（Chrome / Edge / Opera）直接打开
+`tools/sensel-haptic-web.html`，点"连接触摸板"即可。无 root、无服务
+进程、无依赖；协议在浏览器内直接通过 WebHID 与设备通信。
+
+Open `tools/sensel-haptic-web.html` directly in any Chromium browser
+(Chrome / Edge / Opera) and click Connect. No root, no server, no
+dependencies; the protocol talks to the device through WebHID in the
+browser.
+
+- 功能与桌面版一致：草稿预览、保存/取消/重置、释放比值调节。
+- Windows / macOS / ChromeOS 开箱即用；Linux 需先安装 udev 规则
+  （见文件头注释）：`sudo cp tools/70-sensel-haptic-webhid.rules
+  /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger`。
+- Safari 与 Firefox 不支持 WebHID。
+
+- Feature parity with the desktop panel: draft preview, Save/Cancel/
+  Reset, release-ratio adjustment.
+- Works out of the box on Windows / macOS / ChromeOS; Linux needs the
+  udev rule shipped in this repository first.
+- Safari and Firefox do not implement WebHID.
 
 ### 独立控制面板 / Standalone control panel
 
