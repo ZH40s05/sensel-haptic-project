@@ -48,11 +48,12 @@ TRACKPOINT_FORCE_MAX = 255
 RELEASE_RATIO_MIN = 5
 RELEASE_RATIO_MAX = 100
 RELEASE_RATIO_DEFAULT = 65
-# Windows "Medium" preset used by the global Reset button (issue #1).
-RESET_INTENSITY = 71
-RESET_CLICK_FORCE = 82
-RESET_TRACKPOINT_FORCE = 38
-RESET_TRACKPOINT_BUTTONS = False
+# Preset loaded by the global Reset button (issue #1).  These are the
+# current preferred settings measured on the reference device.
+RESET_INTENSITY = 100
+RESET_CLICK_FORCE = 60
+RESET_TRACKPOINT_FORCE = 120
+RESET_TRACKPOINT_BUTTONS = True
 RESET_RELEASE_RATIO = 65
 
 
@@ -578,7 +579,7 @@ class SenselHapticApp:
 
         # Global draft controls: previews are RAM-only; Save persists every
         # changed register, Cancel restores the last saved state, Reset loads
-        # the Windows "Medium" preset as a new draft.
+        # the saved preferred preset as a new draft.
         actions_frame = ttk.LabelFrame(outer, text=_("Pending Changes"), padding=10)
         actions_frame.pack(fill="x", pady=(0, 10))
         self.dirty_label = ttk.Label(
