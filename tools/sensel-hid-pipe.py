@@ -151,9 +151,14 @@ class SenselPipe:
             first |= 0x80
         return bytes((first, address & 0xFF, size))
 
-    def read_register(self, address: int, size: int) -> bytes:
-        if not 1 <= size <= 0xFF:
-            raise ValueError("read size must be between 1 and 255")
+    # After a persisted write the firmware saves the UserSetting to flash and
+    # briefly stops answering the register pipe. The next pipe operation then
+    # fails with EREMOTEIO or a short receive timeout; one retry after a pause
+    # is enough on real hardware.
+    BUSY_RETRIES = 3
+    BUSY_RETRY_DELAY = 1.5
+
+    def _read_register_once(self, address: int, size: int) -> bytes:
         self._drain()
         self.rx_buffer.clear()
         self._send_payload(self._command(True, address, size))
@@ -169,9 +174,19 @@ class SenselPipe:
             raise RuntimeError("register read checksum mismatch")
         return data
 
-    def write_register(self, address: int, data: bytes, persist: bool = False) -> None:
-        if not 1 <= len(data) <= 0xFF:
-            raise ValueError("write size must be between 1 and 255")
+    def read_register(self, address: int, size: int) -> bytes:
+        if not 1 <= size <= 0xFF:
+            raise ValueError("read size must be between 1 and 255")
+        last_error: Exception | None = None
+        for _ in range(self.BUSY_RETRIES):
+            try:
+                return self._read_register_once(address, size)
+            except (OSError, TimeoutError) as error:
+                last_error = error
+                time.sleep(self.BUSY_RETRY_DELAY)
+        raise last_error
+
+    def _write_register_once(self, address: int, data: bytes, persist: bool) -> None:
         self._drain()
         self.rx_buffer.clear()
         packet = self._command(False, address, len(data))
@@ -182,6 +197,18 @@ class SenselPipe:
         self._receive(1)  # response status, not used by SenselSerialDevice
         if persist:
             self.save_register(address)
+
+    def write_register(self, address: int, data: bytes, persist: bool = False) -> None:
+        if not 1 <= len(data) <= 0xFF:
+            raise ValueError("write size must be between 1 and 255")
+        last_error: Exception | None = None
+        for _ in range(self.BUSY_RETRIES):
+            try:
+                return self._write_register_once(address, data, persist)
+            except (OSError, TimeoutError) as error:
+                last_error = error
+                time.sleep(self.BUSY_RETRY_DELAY)
+        raise last_error
 
     def save_register(self, address: int) -> None:
         # SenselSerialDevice.SaveRegister(addr, UserSetting) writes a five-byte

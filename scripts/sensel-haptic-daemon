@@ -83,11 +83,14 @@ class SenselPipe:
             self.lock_held = False
 
     def close(self):
-        if getattr(self, "fd", None) is not None:
-            os.close(self.fd)
-            self.fd = None
-        self.release_lock()
-        self.lock_file.close()
+        fd = getattr(self, "fd", None)
+        self.fd = None
+        try:
+            if fd is not None:
+                os.close(fd)
+        finally:
+            self.release_lock()
+            self.lock_file.close()
 
     def __enter__(self):
         return self
@@ -159,9 +162,14 @@ class SenselPipe:
             first |= 0x80
         return bytes((first, address & 0xFF, size))
 
-    def read_register(self, address, size):
-        if not 1 <= size <= 0xFF:
-            raise ValueError("read size must be between 1 and 255")
+    # After a persisted write the firmware saves the UserSetting to flash and
+    # briefly stops answering the register pipe. The next pipe operation then
+    # fails with EREMOTEIO or a short receive timeout; one retry after a pause
+    # is enough on real hardware.
+    BUSY_RETRIES = 3
+    BUSY_RETRY_DELAY = 1.5
+
+    def _read_register_once(self, address, size):
         self._drain()
         self.rx_buffer.clear()
         self._send_payload(self._command(True, address, size))
@@ -179,10 +187,21 @@ class SenselPipe:
             raise RuntimeError("register read checksum mismatch")
         return data
 
-    def write_register(self, address, data, persist=False):
-        if not 1 <= len(data) <= 0xFF:
-            raise ValueError("write size must be between 1 and 255")
+    def read_register(self, address, size):
+        if not 1 <= size <= 0xFF:
+            raise ValueError("read size must be between 1 and 255")
+        last_error = None
+        for _ in range(self.BUSY_RETRIES):
+            try:
+                return self._read_register_once(address, size)
+            except (OSError, TimeoutError) as error:
+                last_error = error
+                time.sleep(self.BUSY_RETRY_DELAY)
+        raise last_error
+
+    def _write_register_once(self, address, data, persist=False):
         self._drain()
+        self.rx_buffer.clear()
         packet = self._command(False, address, len(data))
         packet += data + bytes((sum(data) & 0xFF,))
         self._send_payload(packet)
@@ -191,6 +210,18 @@ class SenselPipe:
         self._receive(1)  # response status, not used by SenselSerialDevice
         if persist:
             self.save_register(address)
+
+    def write_register(self, address, data, persist=False):
+        if not 1 <= len(data) <= 0xFF:
+            raise ValueError("write size must be between 1 and 255")
+        last_error = None
+        for _ in range(self.BUSY_RETRIES):
+            try:
+                return self._write_register_once(address, data, persist)
+            except (OSError, TimeoutError) as error:
+                last_error = error
+                time.sleep(self.BUSY_RETRY_DELAY)
+        raise last_error
 
     def save_register(self, address):
         record = struct.pack("<HHB", address, USER_SETTING_ATTRIBUTE, 0x51)
@@ -224,11 +255,14 @@ class SenselPipe:
     def set_haptic_intensity(self, intensity):
         if not 0 <= intensity <= 100:
             raise ValueError("haptic intensity must be between 0 and 100")
+        data = bytes((intensity,))
         self.write_register(
             HAPTIC_INTENSITY_REGISTER,
-            bytes((intensity,)),
+            data,
             persist=True,
         )
+        if self.read_register(HAPTIC_INTENSITY_REGISTER, 1) != data:
+            raise RuntimeError("haptic intensity readback mismatch")
         return intensity
 
     def read_trackpoint_click_force(self):
@@ -290,11 +324,14 @@ class SenselPipe:
     def set_trackpoint_buttons(self, enabled):
         if enabled not in (0, 1):
             raise ValueError("TrackPoint button mode must be 0 or 1")
+        data = bytes((enabled,))
         self.write_register(
             PTP_BUTTONS_CONFIG_REGISTER,
-            bytes((enabled,)),
+            data,
             persist=True,
         )
+        if self.read_register(PTP_BUTTONS_CONFIG_REGISTER, 1) != data:
+            raise RuntimeError("TrackPoint button mode readback mismatch")
         return enabled
 
     def print_state(self):

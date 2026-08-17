@@ -30,6 +30,11 @@ for path in python_files:
     compile(path.read_text(encoding="utf-8"), str(path), "exec")
 PY
 
+python3 -m unittest discover \
+    --start-directory tests \
+    --pattern 'test_*.py' \
+    --top-level-directory .
+
 if command -v msgfmt >/dev/null 2>&1; then
     while IFS= read -r -d '' po_file; do
         msgfmt --check --check-format -o /dev/null "${po_file}"

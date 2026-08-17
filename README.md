@@ -1,7 +1,7 @@
 # Sensel Haptic Touchpad for GNOME
 
 Community integration for the Sensel haptic touchpad found in selected
-ThinkPad systems. It provides a standalone GTK control panel and an optional
+ThinkPad systems. It provides a standalone Tk control panel and an optional
 GNOME Settings integration for Fedora.
 
 This project writes private Sensel HID registers. It is experimental hardware
@@ -94,8 +94,8 @@ and revert those changes.
     tools/                             GUI, HID diagnostic tool, and launcher
     patches/                           GNOME Control Center patch
     locale/                            Gettext translation sources
-    docs/                              Protocol and reverse-engineering notes
-    tests/                             Hardware-independent static checks
+    docs/                              Architecture, protocol, and project notes
+    tests/                             Hardware-independent checks and unit tests
 
 The local source, artifacts, build directories, source archives, RPMs,
 generated catalogs, and Windows application files are deliberately excluded
@@ -108,9 +108,15 @@ Run the hardware-independent checks before submitting changes:
 
     ./tests/check.sh
 
-The checks cover shell syntax, Python syntax, gettext catalogs, and the
-desktop entry when the corresponding validation tools are installed. They do
-not access hardware or perform register writes.
+The checks cover shell syntax, Python syntax, protocol behavior, gettext
+catalogs, and the desktop entry when the corresponding validation tools are
+installed. They do not access hardware or perform register writes.
+
+More project information is available in:
+
+- [Architecture](docs/architecture.md)
+- [Compatibility and limitations](docs/compatibility.md)
+- [Upstreaming plan](docs/upstreaming.md)
 
 The GNOME patch is based on the upstream 50.0 source layout. When updating
 GNOME, first obtain a clean upstream source tree, rebase or regenerate the
