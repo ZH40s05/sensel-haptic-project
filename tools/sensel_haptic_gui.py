@@ -254,13 +254,22 @@ class HelperQueue:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.jobs: queue.Queue[Optional[tuple[list[str], Callable]]] = queue.Queue()
+        self.closed = False
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
     def submit(self, arguments: list[str], callback: Callable[[str, Optional[str]], None]) -> None:
+        if self.closed:
+            return
         self.jobs.put((arguments, callback))
 
     def close(self) -> None:
+        self.closed = True
+        while True:
+            try:
+                self.jobs.get_nowait()
+            except queue.Empty:
+                break
         self.jobs.put(None)
 
     def _run(self) -> None:
@@ -275,9 +284,11 @@ class HelperQueue:
             except Exception as exc:  # noqa: BLE001 - report helper failures in the GUI
                 output = ""
                 error = str(exc)
+            if self.closed:
+                continue
             try:
                 self.root.after(0, callback, output, error)
-            except tk.TclError:
+            except (tk.TclError, RuntimeError):
                 return
 
 
@@ -296,8 +307,10 @@ class SenselHapticApp:
         self.read_in_flight = False
         self.saving = False
         self.previewing = False
+        self.preview_pending = 0
         self.saved_intensity = load_saved_intensity()
         self.saved_intensity_baseline = self.saved_intensity
+        self.intensity_draft_raw: Optional[int] = None
 
         # Draft model state: "saved_*" mirror the last committed device state,
         # "applied_*" mirror what the preview currently put into RAM.
@@ -633,7 +646,9 @@ class SenselHapticApp:
         self.device_combo.configure(
             state="readonly" if interactive else "disabled"
         )
-        self.refresh_button.configure(state=state)
+        self.refresh_button.configure(
+            state="disabled" if self.saving or self.previewing else "normal"
+        )
         self.haptic_switch.configure(state=state)
         self.click_force_scale.configure(state=state)
         self.click_force_entry.configure(state=state)
@@ -665,9 +680,12 @@ class SenselHapticApp:
 
     def _current_draft(self) -> dict[str, int]:
         enabled = 1 if self.haptic_feedback_var.get() else 0
-        intensity = (
-            INTENSITY_LEVELS[self.intensity_level_var.get() - 1] if enabled else 0
-        )
+        if enabled:
+            intensity = self.intensity_draft_raw
+            if intensity is None:
+                intensity = INTENSITY_LEVELS[self.intensity_level_var.get() - 1]
+        else:
+            intensity = 0
         return {
             "intensity": intensity,
             "click-force": self.click_force_var.get(),
@@ -707,7 +725,7 @@ class SenselHapticApp:
         self.dirty_var.set(dirty)
         button_state = (
             "normal"
-            if dirty and not self.saving and not self.previewing
+            if dirty and not self.saving and not self.previewing and not self.preview_pending
             else "disabled"
         )
         self.save_button.configure(state=button_state)
@@ -734,7 +752,12 @@ class SenselHapticApp:
         ):
             return
 
+        self.preview_pending += 1
+        self._update_dirty_state()
+
         def finished(_output: str, error: Optional[str]) -> None:
+            self.preview_pending = max(0, self.preview_pending - 1)
+            self._update_dirty_state()
             if error:
                 self._set_status(
                     _("Preview of {label} failed: {error}").format(label=label, error=error)
@@ -758,6 +781,7 @@ class SenselHapticApp:
             or not self.device_path
             or self.saving
             or self.previewing
+            or self.preview_pending
         ):
             return
 
@@ -857,6 +881,7 @@ class SenselHapticApp:
             return
 
         intensity = state["haptic-intensity"]
+        self.intensity_draft_raw = intensity
         if intensity > 0:
             self.saved_intensity = intensity
             haptic_enabled = True
@@ -932,6 +957,7 @@ class SenselHapticApp:
             return
         raw = INTENSITY_LEVELS[level - 1]
         self.saved_intensity = raw
+        self.intensity_draft_raw = raw
         self._update_dirty_state()
         if self.saving:
             return
@@ -953,6 +979,7 @@ class SenselHapticApp:
             self.intensity_value_var.set(str(level))
             self.syncing = False
             self.saved_intensity = raw
+            self.intensity_draft_raw = raw
             self._set_controls_state(True)
             self._update_dirty_state()
             if not self.saving:
@@ -962,6 +989,7 @@ class SenselHapticApp:
                 )
         else:
             self.saved_intensity = INTENSITY_LEVELS[self.intensity_level_var.get() - 1]
+            self.intensity_draft_raw = 0
             save_haptic_preferences(self.saved_intensity, False)
             self._set_controls_state(True)
             self._update_dirty_state()
@@ -1093,23 +1121,25 @@ class SenselHapticApp:
             self._update_dirty_state()
             return
         self._update_dirty_state()
-        if self.click_ratio_applied == ratio or self.saving:
+
+    def _click_ratio_slider_released(self, _event=None) -> None:
+        if (
+            self.syncing
+            or not self.loaded
+            or self.saving
+            or self.previewing
+            or self.click_ratio_applied == self.click_ratio_var.get()
+        ):
             return
         self._preview(
             [
                 "--preview-click-force",
                 self.device_path or "",
                 str(self.click_force_var.get() * 2),
-                str(ratio),
+                str(self.click_ratio_var.get()),
             ],
             _("Click Release Ratio"),
         )
-
-    def _click_ratio_slider_released(self, _event=None) -> None:
-        # tk.Scale fires the command continuously while dragging; the helper
-        # write is issued from the change handler only on release via this
-        # indirection to avoid hammering the device mid-drag.
-        pass
 
     def _trackpoint_ratio_changed(self, value: str) -> None:
         ratio = max(
@@ -1120,20 +1150,25 @@ class SenselHapticApp:
             self._update_dirty_state()
             return
         self._update_dirty_state()
-        if self.trackpoint_ratio_applied == ratio or self.saving:
+
+    def _trackpoint_ratio_slider_released(self, _event=None) -> None:
+        if (
+            self.syncing
+            or not self.loaded
+            or self.saving
+            or self.previewing
+            or self.trackpoint_ratio_applied == self.trackpoint_ratio_var.get()
+        ):
             return
         self._preview(
             [
                 "--preview-trackpoint-click-force",
                 self.device_path or "",
                 str(self.trackpoint_force_var.get()),
-                str(ratio),
+                str(self.trackpoint_ratio_var.get()),
             ],
             _("TrackPoint Release Ratio"),
         )
-
-    def _trackpoint_ratio_slider_released(self, _event=None) -> None:
-        pass
 
     # ------------------------------------------------------------------
     # Global Save / Cancel / Reset
@@ -1183,7 +1218,13 @@ class SenselHapticApp:
         return operations
 
     def _save_clicked(self) -> None:
-        if not self.loaded or not self.device_path or self.saving or self.previewing:
+        if (
+            not self.loaded
+            or not self.device_path
+            or self.saving
+            or self.previewing
+            or self.preview_pending
+        ):
             return
         operations = self._pending_operations()
         if not operations:
@@ -1224,6 +1265,7 @@ class SenselHapticApp:
             else:
                 self.saving = False
                 draft = self._current_draft()
+                self.intensity_draft_raw = draft["intensity"]
                 self.intensity_applied = draft["intensity"]
                 self.click_force_applied = draft["click-force"]
                 self.click_ratio_applied = draft["click-ratio"]
@@ -1243,7 +1285,13 @@ class SenselHapticApp:
         )
 
     def _cancel_clicked(self) -> None:
-        if not self.loaded or not self.device_path or self.saving or self.previewing:
+        if (
+            not self.loaded
+            or not self.device_path
+            or self.saving
+            or self.previewing
+            or self.preview_pending
+        ):
             return
         saved = self._saved_draft()
         self.saved_intensity = self.saved_intensity_baseline
@@ -1254,6 +1302,7 @@ class SenselHapticApp:
             self.intensity_value_var.set(str(intensity_to_level(saved["intensity"])))
         else:
             self.haptic_feedback_var.set(False)
+        self.intensity_draft_raw = saved["intensity"]
         self.click_force_var.set(saved["click-force"])
         self.click_force_value_var.set(str(saved["click-force"]))
         self.click_ratio_var.set(saved["click-ratio"])
@@ -1301,13 +1350,20 @@ class SenselHapticApp:
         )
 
     def _reset_clicked(self) -> None:
-        if not self.loaded or not self.device_path or self.saving or self.previewing:
+        if (
+            not self.loaded
+            or not self.device_path
+            or self.saving
+            or self.previewing
+            or self.preview_pending
+        ):
             return
         self.syncing = True
         self.haptic_feedback_var.set(True)
         self.intensity_level_var.set(intensity_to_level(RESET_INTENSITY))
         self.intensity_value_var.set(str(intensity_to_level(RESET_INTENSITY)))
         self.saved_intensity = RESET_INTENSITY
+        self.intensity_draft_raw = RESET_INTENSITY
         self.click_force_var.set(RESET_CLICK_FORCE)
         self.click_force_value_var.set(str(RESET_CLICK_FORCE))
         self.click_ratio_var.set(RESET_RELEASE_RATIO)

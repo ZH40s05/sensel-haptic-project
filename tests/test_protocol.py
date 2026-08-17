@@ -87,6 +87,15 @@ class RegisterOperationTests(unittest.TestCase):
         self.assertEqual([call.args[1] for call in calls[3:]], [b"\x19"] * 3)
         self.assertTrue(all(call.kwargs["persist"] for call in calls))
 
+    def test_state_read_rejects_mismatched_trackpoint_up_registers(self) -> None:
+        self.pipe.read_register.side_effect = [
+            b"R", b"5",             # main click down/up
+            b"&", b"&", b"&",       # TrackPoint down registers
+            b"\x19", b"\x1a", b"\x19",  # TrackPoint up registers
+        ]
+        with self.assertRaisesRegex(RuntimeError, "up-force registers"):
+            self.pipe.read_state_values()
+
     def test_scalar_settings_validate_and_write(self) -> None:
         # No readback for these two: the flash-busy window after a persisted
         # write would stall every adjustment (see daemon comments).
@@ -275,9 +284,11 @@ class ResetStateTests(unittest.TestCase):
         app.device_path = "/dev/hidraw-test"
         app.saving = False
         app.previewing = False
+        app.preview_pending = 0
         app.syncing = False
         app.saved_intensity = 71
         app.saved_intensity_baseline = 71
+        app.intensity_draft_raw = 71
         app.haptic_feedback_var = self._var(False)
         app.intensity_level_var = self._var(5)
         app.intensity_value_var = self._var("5")

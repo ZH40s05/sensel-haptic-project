@@ -41,7 +41,7 @@
  struct _CcMousePanel
  {
    CcPanel            parent_instance;
-@@ -55,6 +79,38 @@
+@@ -55,6 +79,39 @@
    GtkScale          *touchpad_speed_scale;
    AdwSwitchRow      *touchpad_toggle_row;
    AdwSwitchRow      *touchpad_typing_row;
@@ -64,6 +64,7 @@
 +  GSubprocess       *sensel_trackpoint_buttons_write_process;
 +  GSubprocess       *sensel_trackpoint_force_write_process;
 +  guint              sensel_pending_intensity;
++  guint              sensel_intensity_apply_source;
 +  guint              sensel_pending_click_force;
 +  guint              sensel_pending_trackpoint_force;
 +  guint              sensel_saved_intensity;
@@ -80,7 +81,7 @@
  
    GtkSwitch         *pointingstick_accel_switch;
    AdwViewStackPage  *pointingstick_stack_page;
-@@ -102,6 +158,1066 @@
+@@ -102,6 +159,1100 @@
  
  }
  
@@ -124,12 +125,15 @@
 +}
 +
 +static void sensel_stop_daemon (CcMousePanel *self);
++static void sensel_stop_intensity (CcMousePanel *self);
 +static void sensel_stop_state_read (CcMousePanel *self);
 +static void sensel_stop_read (CcMousePanel *self);
 +static void sensel_stop_click_read (CcMousePanel *self);
 +static void sensel_stop_click_write (CcMousePanel *self);
 +static void sensel_stop_trackpoint_write (CcMousePanel *self);
 +static void sensel_read_current_state (CcMousePanel *self);
++static void sensel_send_intensity (CcMousePanel *self,
++                                   guint         intensity);
 +static void sensel_send_click_force (CcMousePanel *self,
 +                                     guint         force);
 +static void sensel_send_trackpoint_force (CcMousePanel *self,
@@ -145,6 +149,7 @@
 +
 +  if (device_changed)
 +    {
++      sensel_stop_intensity (self);
 +      sensel_stop_daemon (self);
 +      sensel_stop_state_read (self);
 +      sensel_stop_read (self);
@@ -710,6 +715,41 @@
 +}
 +
 +static void
++sensel_stop_intensity (CcMousePanel *self)
++{
++  if (self->sensel_intensity_apply_source)
++    {
++      g_source_remove (self->sensel_intensity_apply_source);
++      self->sensel_intensity_apply_source = 0;
++    }
++}
++
++static gboolean
++sensel_apply_intensity_cb (gpointer user_data)
++{
++  CcMousePanel *self = CC_MOUSE_PANEL (user_data);
++
++  self->sensel_intensity_apply_source = 0;
++  if (self->sensel_hidraw)
++    {
++      sensel_save_haptic_preferences (self, self->sensel_pending_intensity, TRUE);
++      sensel_send_intensity (self, self->sensel_pending_intensity);
++    }
++
++  return G_SOURCE_REMOVE;
++}
++
++static void
++sensel_schedule_intensity (CcMousePanel *self,
++                           guint         intensity)
++{
++  self->sensel_pending_intensity = intensity;
++  sensel_stop_intensity (self);
++  self->sensel_intensity_apply_source =
++    g_timeout_add (250, sensel_apply_intensity_cb, self);
++}
++
++static void
 +sensel_send_intensity (CcMousePanel *self,
 +                       guint         intensity)
 +{
@@ -764,8 +804,7 @@
 +
 +  intensity = sensel_level_to_intensity (self);
 +  self->sensel_pending_intensity = intensity;
-+  sensel_save_haptic_preferences (self, intensity, TRUE);
-+  sensel_send_intensity (self, self->sensel_pending_intensity);
++  sensel_schedule_intensity (self, intensity);
 +}
 +
 +static void
@@ -808,8 +847,7 @@
 +                           sensel_intensity_to_level (intensity));
 +      self->sensel_syncing_scale = FALSE;
 +      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_intensity_scale), TRUE);
-+      sensel_save_haptic_preferences (self, intensity, TRUE);
-+      sensel_send_intensity (self, intensity);
++      sensel_schedule_intensity (self, intensity);
 +    }
 +  else
 +    {
@@ -823,10 +861,7 @@
 +      gtk_widget_set_sensitive (GTK_WIDGET (self->sensel_intensity_scale), FALSE);
 +      /* Do not overwrite the remembered value with zero when turning the
 +       * switch off. Zero belongs only in the device register. */
-+      sensel_save_haptic_preferences (self,
-+                                      self->sensel_saved_intensity,
-+                                      FALSE);
-+      sensel_send_intensity (self, 0);
++      sensel_schedule_intensity (self, 0);
 +    }
 +}
 +
@@ -1166,10 +1201,11 @@
  }
  
  static void
-@@ -402,6 +1522,13 @@
+@@ -402,6 +1523,14 @@
  
    g_clear_object (&self->mouse_settings);
    g_clear_object (&self->touchpad_settings);
++  sensel_stop_intensity (self);
 +  sensel_stop_read (self);
 +  sensel_stop_daemon (self);
 +  sensel_stop_state_read (self);
@@ -1180,7 +1216,7 @@
    g_clear_pointer (&self->mouse_test, gtk_window_destroy);
  
    G_OBJECT_CLASS (cc_mouse_panel_parent_class)->dispose (object);
-@@ -487,9 +1614,28 @@
+@@ -487,9 +1615,28 @@
    gtk_widget_class_bind_template_child (widget_class, CcMousePanel, touchpad_toggle_row);
    gtk_widget_class_bind_template_child (widget_class, CcMousePanel, touchpad_typing_row);
    gtk_widget_class_bind_template_child (widget_class, CcMousePanel, two_finger_push_row);

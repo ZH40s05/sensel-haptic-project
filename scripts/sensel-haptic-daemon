@@ -271,7 +271,17 @@ class SenselPipe:
         main_down = self.read_register(CLICK_DOWN_REGISTER, 1)[0]
         main_up = self.read_register(CLICK_UP_REGISTER, 1)[0]
         trackpoint_down = self.read_trackpoint_click_force()
-        trackpoint_up = self.read_register(THREE_HB_LEFT_UP_REGISTER, 1)[0]
+        trackpoint_up_values = tuple(
+            self.read_register(address, 1)[0]
+            for address in (
+                THREE_HB_LEFT_UP_REGISTER,
+                THREE_HB_RIGHT_UP_REGISTER,
+                THREE_HB_MIDDLE_UP_REGISTER,
+            )
+        )
+        if len(set(trackpoint_up_values)) != 1:
+            raise RuntimeError("TrackPoint up-force registers do not match")
+        trackpoint_up = trackpoint_up_values[0]
         return {
             "haptic-intensity": self.read_haptic_intensity(),
             "click-force": main_down * 2,

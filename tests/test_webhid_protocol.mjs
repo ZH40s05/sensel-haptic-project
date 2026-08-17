@@ -29,7 +29,7 @@ js = js.replace("if (!navigator.hid) {", "if (false) {");
 js += "\n;globalThis.__exports = { SenselPipe, releaseForce, ratioFromRegisters," +
       " levelToRaw, rawToLevel, REG, readState, previewClickForce," +
       " commitClickForce, previewTpForce, commitTpForce, ui, currentDraft," +
-      " applyState, refreshDirty };\n";
+      " applyState, refreshDirty, setControls };\n";
 
 class FakeSensel {
   constructor() {
@@ -94,7 +94,7 @@ const documentStub = {
 };
 
 const context = {
-  navigator: { hid: {}, language: "zh-CN" },
+  navigator: { hid: {}, language: "en-US" },
   document: documentStub,
   console, setTimeout, clearTimeout,
 };
@@ -112,6 +112,11 @@ function check(condition, label) {
     console.error(`FAIL - ${label}`);
   }
 }
+
+check(
+  !html.includes("保存时触摸板短暂无响应（约 2.6 秒/寄存器）。"),
+  "save hint omits the timing detail",
+);
 
 const fake = new FakeSensel();
 const pipe = new E.SenselPipe(fake);
@@ -176,6 +181,18 @@ try {
   check(E.levelToRaw(5) === 71 && E.rawToLevel(71) === 5,
     "intensity level mapping");
 
+  // A device may contain a valid intensity value between the ten UI levels.
+  // It must remain the draft baseline until the user changes the slider.
+  const nonCanonical = {
+    intensity: 33, clickForce: 90, clickRatio: 80,
+    tpForce: 50, tpRatio: 40, tpButtons: true,
+  };
+  E.ui.saved = nonCanonical;
+  E.applyState(nonCanonical);
+  E.ui.loaded = true;
+  E.refreshDirty();
+  check(!E.ui.dirty, "non-canonical intensity starts clean");
+
   // Reset must work from a clean, non-default state and leave the saved
   // baseline untouched until Save is pressed.
   E.ui.pipe = pipe;
@@ -215,6 +232,12 @@ try {
         context.document.getElementById("save-btn").disabled &&
         context.document.getElementById("cancel-btn").disabled,
         "reset clears dirty state when defaults are already saved");
+
+  // Disconnect must be locked while an operation is in flight.
+  E.ui.saving = true;
+  E.setControls(false);
+  check(context.document.getElementById("forget-btn").disabled,
+    "disconnect is disabled while saving");
 } finally {
   pipe.close();
 }

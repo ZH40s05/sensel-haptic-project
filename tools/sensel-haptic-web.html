@@ -90,7 +90,6 @@ kbd { background:#eef1f4; border:1px solid var(--line); border-radius:4px; paddi
       此浏览器不支持 WebHID。请改用 Chrome / Edge / Opera。
     </p>
     <button id="connect-btn" class="primary" data-i>连接触摸板</button>
-    <p class="dim" data-i>仅请求 2C2F:0028 设备权限。</p>
   </div>
 
   <div id="app" class="hidden">
@@ -106,7 +105,7 @@ kbd { background:#eef1f4; border:1px solid var(--line); border-radius:4px; paddi
       <h2 data-i>触觉反馈</h2>
       <div class="row">
         <label class="chk"><input type="checkbox" id="haptic-on">
-          <span data-i>启用触觉反馈</span></label>
+          <span id="haptic-on-label" data-i>启用触觉反馈</span></label>
       </div>
     </div>
 
@@ -142,7 +141,7 @@ kbd { background:#eef1f4; border:1px solid var(--line); border-radius:4px; paddi
       <h2 data-i>TrackPoint 按钮</h2>
       <div class="row">
         <label class="chk"><input type="checkbox" id="tp-on">
-          <span data-i>启用 TrackPoint 按钮</span></label>
+          <span id="tp-on-label" data-i>启用 TrackPoint 按钮</span></label>
       </div>
     </div>
 
@@ -175,7 +174,7 @@ kbd { background:#eef1f4; border:1px solid var(--line); border-radius:4px; paddi
         <button id="cancel-btn" data-i>取消</button>
         <button id="reset-btn" data-i>恢复默认</button>
       </div>
-      <p class="dim" data-i>保存时触摸板短暂无响应（约 2.6 秒/寄存器）。</p>
+      <p class="dim" data-i>保存时触摸板短暂无响应。</p>
     </div>
 
     <p class="status" id="status"></p>
@@ -206,7 +205,7 @@ const VENDOR_ID = 0x2c2f, PRODUCT_ID = 0x0028;
 const STR = {
   zh: {
     title: "Sensel 触觉触摸板", sub: "WebHID 跨平台控制面板",
-    connect: "连接触摸板", connectHint: "仅请求 2C2F:0028 设备权限。",
+    connect: "连接触摸板",
     noWebHID: "此浏览器不支持 WebHID。请改用 Chrome / Edge / Opera。",
     device: "设备", disconnect: "断开",
     haptic: "触觉反馈", hapticOn: "启用触觉反馈",
@@ -219,9 +218,9 @@ const STR = {
     tpForceHint: "3HB 寄存器单位 1–255。Windows 预设：28 / 38 / 60。",
     pending: "待保存的更改", dirtyOn: "● 有未保存的更改", dirtyOff: "● 所有更改已保存",
     save: "保存", cancel: "取消", reset: "恢复默认",
-    saveHint: "保存时触摸板短暂无响应（约 2.6 秒/寄存器）。",
+    saveHint: "保存时触摸板短暂无响应。",
     reading: "正在读取设备设置…", readFail: "读取失败：", applyFail: "操作失败：",
-    previewing: "已预览；点“保存”写入。", savedAll: "已保存到设备。",
+    savedAll: "已保存到设备。",
     saving: (i, n, l) => `保存 ${i}/${n}：${l}…`, saveItemFail: (l) => `保存${l}失败：`,
     cancelled: "已取消更改；保留原设置。", resetDone: "默认值已载入草稿；点“保存”写入。",
     devLost: "设备已断开，请重连。",
@@ -229,7 +228,7 @@ const STR = {
   },
   en: {
     title: "Sensel Haptic Touchpad", sub: "WebHID cross-platform control panel",
-    connect: "Connect touchpad", connectHint: "Requests access to device 2C2F:0028 only.",
+    connect: "Connect touchpad",
     noWebHID: "WebHID is unavailable. Use Chrome, Edge, or Opera.",
     device: "Device", disconnect: "Disconnect",
     haptic: "Haptic Feedback", hapticOn: "Enable Haptic Feedback",
@@ -242,9 +241,9 @@ const STR = {
     tpForceHint: "3HB register units 1–255. Windows presets: 28 / 38 / 60.",
     pending: "Pending Changes", dirtyOn: "● You have unsaved changes", dirtyOff: "● All changes saved",
     save: "Save", cancel: "Cancel", reset: "Reset to Defaults",
-    saveHint: "The touchpad pauses while saving (~2.6 s/register).",
+    saveHint: "The touchpad pauses while saving.",
     reading: "Reading settings from the device…", readFail: "Read failed: ", applyFail: "Operation failed: ",
-    previewing: "Previewed; press Save to write.", savedAll: "Saved to device.",
+    savedAll: "Saved to device.",
     saving: (i, n, l) => `Save ${i}/${n}: ${l}…`, saveItemFail: (l) => `Saving ${l} failed: `,
     cancelled: "Changes cancelled; saved settings kept.", resetDone: "Defaults loaded as a draft; press Save to write.",
     devLost: "Device disconnected; reconnect.",
@@ -262,8 +261,6 @@ function applyI18n() {
     const set = (sel, v) => { const e = document.querySelector(sel); if (e) e.textContent = v; };
     set("h1", t.title); set(".sub", t.sub); set("#connect-btn", t.connect);
     set("#no-webhid", t.noWebHID);
-    const hint = document.querySelector("#connect-zone .dim");
-    if (hint) hint.textContent = t.connectHint;
     set("#dev-label", t.device + ":"); set("#forget-btn", t.disconnect);
     document.querySelectorAll("h2").forEach(h => {
       const m = { "触觉反馈": t.haptic, "触觉强度": t.intensity, "点击力度": t.click,
@@ -275,11 +272,10 @@ function applyI18n() {
       const m = { "主点击按下寄存器 1–255。Windows 预设：60 / 82 / 95（120 / 164 / 190 Gf）。": t.clickHint,
                   "释放比值：按下力度的百分比（Windows 默认 65）。": t.ratioHint,
                   "3HB 寄存器单位 1–255。Windows 预设：28 / 38 / 60。": t.tpForceHint,
-                  "保存时触摸板短暂无响应（约 2.6 秒/寄存器）。": t.saveHint };
+                  "保存时触摸板短暂无响应。": t.saveHint };
       if (m[p.textContent]) p.textContent = m[p.textContent];
     });
-    document.querySelector('label.chk span[data-i="启用触觉反馈"]').textContent = t.hapticOn;
-    document.querySelector('label.chk span[data-i="启用 TrackPoint 按钮"]').textContent = t.tpOn;
+    set("#haptic-on-label", t.hapticOn); set("#tp-on-label", t.tpOn);
     set("#save-btn", t.save); set("#cancel-btn", t.cancel); set("#reset-btn", t.reset);
     set("#dirty", ui.dirty ? t.dirtyOn : t.dirtyOff);
   }
@@ -404,8 +400,18 @@ async function readState(pipe) {
   const inten = (await pipe.readRegister(REG.INTENSITY, 1))[0];
   const cd = (await pipe.readRegister(REG.CLICK_DOWN, 1))[0];
   const cu = (await pipe.readRegister(REG.CLICK_UP, 1))[0];
-  const td = (await pipe.readRegister(REG.TP_L_DOWN, 1))[0];
-  const tu = (await pipe.readRegister(REG.TP_L_UP, 1))[0];
+  const readValues = async addresses => {
+    const values = [];
+    for (const address of addresses)
+      values.push((await pipe.readRegister(address, 1))[0]);
+    return values;
+  };
+  const tpDown = await readValues([REG.TP_L_DOWN, REG.TP_R_DOWN, REG.TP_M_DOWN]);
+  const tpUp = await readValues([REG.TP_L_UP, REG.TP_R_UP, REG.TP_M_UP]);
+  if (new Set(tpDown).size !== 1 || new Set(tpUp).size !== 1)
+    throw new Error("TrackPoint force registers do not match");
+  const td = tpDown[0];
+  const tu = tpUp[0];
   const btn = (await pipe.readRegister(REG.TP_BUTTONS, 1))[0];
   return {
     intensity: inten,
@@ -443,6 +449,7 @@ const ui = {
   device: null, pipe: null,
   loaded: false, saving: false, previewing: false, syncing: false,
   saved: null,   // last committed/saved draft (mirrors device flash+RAM)
+  intensityDraftRaw: null,
   dirty: false,
 };
 const t = () => lang();
@@ -450,7 +457,9 @@ const t = () => lang();
 function currentDraft() {
   const enabled = $("haptic-on").checked;
   return {
-    intensity: enabled ? levelToRaw(+$("intensity").value) : 0,
+    intensity: enabled
+      ? (ui.intensityDraftRaw ?? levelToRaw(+$("intensity").value))
+      : 0,
     clickForce: +$("click-force").value, clickRatio: +$("click-ratio").value,
     tpForce: +$("tp-force").value, tpRatio: +$("tp-ratio").value,
     tpButtons: $("tp-on").checked,
@@ -478,6 +487,7 @@ function refreshDirty() {
 function setControls(on) {
   for (const id of ["intensity", "click-force", "click-ratio", "tp-force", "tp-ratio",
                     "haptic-on", "tp-on"]) $(id).disabled = !on;
+  $("forget-btn").disabled = !on || ui.saving || ui.previewing;
 }
 
 /* connect / disconnect -------------------------------------------------- */
@@ -508,13 +518,16 @@ async function openDevice(device) {
     ui.saved = await readState(ui.pipe);
   } catch (e) {
     setStatus(t().readFail + e.message, "err");
+    // Keep the recovery path available when the initial state read fails.
+    setControls(false);
+    $("forget-btn").disabled = false;
     return;
   }
   applyState(ui.saved);
   ui.loaded = true;
   setControls(true);
   refreshDirty();
-  setStatus(t().previewing, "ok");
+  setStatus("");
 }
 function onDevLost(ev) {
   if (ui.device && ev.device !== ui.device) return;
@@ -526,6 +539,7 @@ function onDevLost(ev) {
   setStatus(t().devLost, "warn");
 }
 $("forget-btn").onclick = async () => {
+  if (ui.saving || ui.previewing) return;
   try { ui.pipe?.close(); if (ui.device?.opened) await ui.device.close(); } catch {}
   ui.device = null; ui.pipe = null; ui.loaded = false;
   ui.saving = false; ui.previewing = false;
@@ -536,6 +550,7 @@ $("forget-btn").onclick = async () => {
 
 function applyState(s) {
   ui.syncing = true;
+  ui.intensityDraftRaw = s.intensity;
   $("haptic-on").checked = s.intensity > 0;
   $("intensity").value = s.intensity > 0 ? rawToLevel(s.intensity) : rawToLevel(0);
   $("intensity-v").textContent = $("intensity").value;
@@ -557,7 +572,7 @@ async function safePreview(fn, allowClean = false, successMessage = null) {
   refreshDirty();
   try {
     await fn();
-    setStatus(successMessage || t().previewing);
+    setStatus(successMessage || "");
   } catch (e) {
     setStatus(t().applyFail + e.message, "err");
     try {
@@ -576,14 +591,22 @@ async function safePreview(fn, allowClean = false, successMessage = null) {
     }
   }
 }
-$("intensity").oninput = () => { $("intensity-v").textContent = $("intensity").value; };
+$("intensity").oninput = () => {
+  $("intensity-v").textContent = $("intensity").value;
+  if ($("haptic-on").checked)
+    ui.intensityDraftRaw = levelToRaw(+$("intensity").value);
+  refreshDirty();
+};
 $("intensity").onchange = () => safePreview(() => {
   const raw = $("haptic-on").checked ? levelToRaw(+$("intensity").value) : 0;
+  ui.intensityDraftRaw = raw;
   return ui.pipe.writeRegister(REG.INTENSITY, [raw], false);
 });
-$("haptic-on").onchange = () => safePreview(() =>
-  ui.pipe.writeRegister(REG.INTENSITY,
-    [$("haptic-on").checked ? levelToRaw(+$("intensity").value) : 0], false));
+$("haptic-on").onchange = () => safePreview(() => {
+  const raw = $("haptic-on").checked ? levelToRaw(+$("intensity").value) : 0;
+  ui.intensityDraftRaw = raw;
+  return ui.pipe.writeRegister(REG.INTENSITY, [raw], false);
+});
 $("click-force").oninput = () => { $("click-force-v").textContent = $("click-force").value; };
 $("click-force").onchange = () => safePreview(() =>
   previewClickForce(ui.pipe, +$("click-force").value, +$("click-ratio").value));
