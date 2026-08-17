@@ -255,14 +255,14 @@ class SenselPipe:
     def set_haptic_intensity(self, intensity):
         if not 0 <= intensity <= 100:
             raise ValueError("haptic intensity must be between 0 and 100")
-        data = bytes((intensity,))
+        # No immediate readback: saving the UserSetting puts the firmware into
+        # a ~1.5-3 s flash-busy window where the pipe does not answer, so
+        # verifying right after the write would stall every adjustment.
         self.write_register(
             HAPTIC_INTENSITY_REGISTER,
-            data,
+            bytes((intensity,)),
             persist=True,
         )
-        if self.read_register(HAPTIC_INTENSITY_REGISTER, 1) != data:
-            raise RuntimeError("haptic intensity readback mismatch")
         return intensity
 
     def read_trackpoint_click_force(self):
@@ -324,14 +324,12 @@ class SenselPipe:
     def set_trackpoint_buttons(self, enabled):
         if enabled not in (0, 1):
             raise ValueError("TrackPoint button mode must be 0 or 1")
-        data = bytes((enabled,))
+        # Same flash-busy window as set_haptic_intensity: skip the readback.
         self.write_register(
             PTP_BUTTONS_CONFIG_REGISTER,
-            data,
+            bytes((enabled,)),
             persist=True,
         )
-        if self.read_register(PTP_BUTTONS_CONFIG_REGISTER, 1) != data:
-            raise RuntimeError("TrackPoint button mode readback mismatch")
         return enabled
 
     def print_state(self):

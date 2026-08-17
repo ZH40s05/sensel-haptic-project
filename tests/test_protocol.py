@@ -88,15 +88,18 @@ class RegisterOperationTests(unittest.TestCase):
         self.assertTrue(all(call.kwargs["persist"] for call in calls))
 
     def test_scalar_settings_validate_and_write(self) -> None:
-        self.pipe.read_register.side_effect = [b"d"]
+        # No readback for these two: the flash-busy window after a persisted
+        # write would stall every adjustment (see daemon comments).
+        self.pipe.read_register.side_effect = [b"x"]  # must not be consumed
         self.assertEqual(self.pipe.set_haptic_intensity(100), 100)
         self.assertEqual(
             self.pipe.write_register.call_args,
             call(daemon.HAPTIC_INTENSITY_REGISTER, b"d", persist=True),
         )
+        self.pipe.read_register.assert_not_called()
 
         self.pipe.write_register.reset_mock()
-        self.pipe.read_register.side_effect = [b"\x01"]
+        self.pipe.read_register.reset_mock()
         self.assertEqual(self.pipe.set_trackpoint_buttons(1), 1)
         self.assertEqual(
             self.pipe.write_register.call_args,
