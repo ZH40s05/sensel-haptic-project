@@ -71,18 +71,19 @@ package set depends on the installed Fedora release.
 
 ### WebHID 跨平台面板（推荐，无需安装）/ WebHID cross-platform panel (no install)
 
-用 Chromium 系浏览器（Chrome / Edge / Opera）直接打开
-`tools/sensel-haptic-web.html`，点"连接触摸板"即可。无 root、无服务
-进程、无依赖；协议在浏览器内直接通过 WebHID 与设备通信。
+**在线版 / Live**: https://zh40s05.github.io/sensel-haptic-project/ —
+用 Chromium 系浏览器（Chrome / Edge / Opera）直接打开，点"连接触摸板"
+即可。无 root、无服务进程、无依赖；协议在浏览器内直接通过 WebHID 与
+设备通信。也可下载 `tools/sensel-haptic-web.html` 本地双击使用。
 
-Open `tools/sensel-haptic-web.html` directly in any Chromium browser
-(Chrome / Edge / Opera) and click Connect. No root, no server, no
-dependencies; the protocol talks to the device through WebHID in the
-browser.
+**Live page**: https://zh40s05.github.io/sensel-haptic-project/ — open
+it in any Chromium browser (Chrome / Edge / Opera) and click Connect.
+No root, no server, no dependencies; the protocol talks to the device
+through WebHID in the browser. The single-file `tools/sensel-haptic-web.html`
+works offline from file:// as well.
 
 - 功能与桌面版一致：草稿预览、保存/取消/重置、释放比值调节。
-- Windows / macOS / ChromeOS 开箱即用；Linux 需先安装 udev 规则
-  （见文件头注释）：`sudo cp tools/70-sensel-haptic-webhid.rules
+- Linux 需先安装 udev 规则（见文件头注释）：`sudo cp tools/70-sensel-haptic-webhid.rules
   /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger`。
 - Safari 与 Firefox 不支持 WebHID。
 
