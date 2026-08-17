@@ -40,6 +40,36 @@ THREE_HB_FORCE_MAX = 255
 # values to divide a second time.
 THREE_HB_FORCE_LEVELS = (28, 38, 60)
 RELEASE_FORCE_RATIO = 0.65
+# Release ratios are accepted between these bounds (as percentages) so the
+# computed up register stays a valid 1..255 byte even for down=1.
+RELEASE_RATIO_MIN = 5
+RELEASE_RATIO_MAX = 100
+
+
+def release_force(down, ratio_percent):
+    """Up-register value for a down value and a ratio in percent.
+
+    The Windows panel hardcodes 65%.  The up register must stay in 1..255,
+    so tiny down values clamp up to at least 1.
+    """
+    if not RELEASE_RATIO_MIN <= ratio_percent <= RELEASE_RATIO_MAX:
+        raise ValueError(
+            "release ratio must be an integer from 5 to 100 (percent of the down force)"
+        )
+    return max(1, min(255, int(round(down * ratio_percent / 100.0))))
+
+
+def parse_ratio(text):
+    """Accept a ratio as percent (65) or fraction (0.65); return percent."""
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        raise ValueError("release ratio must be a number from 5 to 100 (percent)")
+    if value <= 1.0:
+        value *= 100.0
+    if not RELEASE_RATIO_MIN <= value <= RELEASE_RATIO_MAX:
+        raise ValueError("release ratio must be a number from 5 to 100 (percent)")
+    return int(round(value))
 
 
 def validate_device(path):
@@ -232,7 +262,26 @@ class SenselPipe:
         self.read_register(CLICK_UP_REGISTER, 1)
         return down * 2
 
-    def set_main_click_force(self, gf):
+    def read_state_values(self):
+        """Full register read used by --read-state.
+
+        Reports both down and up registers so the GUI can restore the
+        release-ratio draft control from the actual device state.
+        """
+        main_down = self.read_register(CLICK_DOWN_REGISTER, 1)[0]
+        main_up = self.read_register(CLICK_UP_REGISTER, 1)[0]
+        trackpoint_down = self.read_trackpoint_click_force()
+        trackpoint_up = self.read_register(THREE_HB_LEFT_UP_REGISTER, 1)[0]
+        return {
+            "haptic-intensity": self.read_haptic_intensity(),
+            "click-force": main_down * 2,
+            "click-up": main_up,
+            "trackpoint-click-force": trackpoint_down,
+            "trackpoint-click-up": trackpoint_up,
+            "trackpoint-buttons": int(bool(self.read_trackpoint_buttons())),
+        }
+
+    def set_main_click_force(self, gf, ratio_percent=65):
         if (
             gf < CLICK_FORCE_MIN
             or gf > CLICK_FORCE_MAX
@@ -240,7 +289,7 @@ class SenselPipe:
         ):
             raise ValueError("click force must be an even value from 2 to 510 Gf")
         down = gf // 2
-        up = int(round(down * RELEASE_FORCE_RATIO))
+        up = release_force(down, ratio_percent)
         self.write_register(CLICK_DOWN_REGISTER, bytes((down,)), persist=True)
         self.write_register(CLICK_UP_REGISTER, bytes((up,)), persist=True)
         if self.read_register(CLICK_DOWN_REGISTER, 1)[0] != down:
@@ -249,7 +298,7 @@ class SenselPipe:
             raise RuntimeError("main click-up force readback mismatch")
         return down, up
 
-    def preview_main_click_force(self, gf):
+    def preview_main_click_force(self, gf, ratio_percent=65):
         """Write RAM only: takes effect immediately, no flash, no readback."""
         if (
             gf < CLICK_FORCE_MIN
@@ -258,12 +307,12 @@ class SenselPipe:
         ):
             raise ValueError("click force must be an even value from 2 to 510 Gf")
         down = gf // 2
-        up = int(round(down * RELEASE_FORCE_RATIO))
+        up = release_force(down, ratio_percent)
         self.write_register(CLICK_DOWN_REGISTER, bytes((down,)), persist=False)
         self.write_register(CLICK_UP_REGISTER, bytes((up,)), persist=False)
         return down, up
 
-    def commit_main_click_force(self, gf):
+    def commit_main_click_force(self, gf, ratio_percent=65):
         """Persist each register right after writing it.
 
         Saving a UserSetting makes the firmware reload the whole user-setting
@@ -280,7 +329,7 @@ class SenselPipe:
         ):
             raise ValueError("click force must be an even value from 2 to 510 Gf")
         down = gf // 2
-        up = int(round(down * RELEASE_FORCE_RATIO))
+        up = release_force(down, ratio_percent)
         self.write_register(CLICK_DOWN_REGISTER, bytes((down,)), persist=True)
         self.write_register(CLICK_UP_REGISTER, bytes((up,)), persist=True)
         return down, up
@@ -325,14 +374,14 @@ class SenselPipe:
             raise RuntimeError("TrackPoint down-force registers do not match")
         return values[0]
 
-    def set_trackpoint_click_force(self, gf):
+    def set_trackpoint_click_force(self, gf, ratio_percent=65):
         if gf < THREE_HB_FORCE_MIN or gf > THREE_HB_FORCE_MAX:
             raise ValueError(
                 "TrackPoint click force must be a value from 1 to 255 "
                 "(Windows TrackPoint register units)"
             )
         down = gf
-        up = int(round(down * RELEASE_FORCE_RATIO))
+        up = release_force(down, ratio_percent)
         for address in (
             THREE_HB_LEFT_DOWN_REGISTER,
             THREE_HB_RIGHT_DOWN_REGISTER,
@@ -365,7 +414,7 @@ class SenselPipe:
                 )
         return down, up
 
-    def preview_trackpoint_click_force(self, gf):
+    def preview_trackpoint_click_force(self, gf, ratio_percent=65):
         """Write RAM only: takes effect immediately, no flash, no readback."""
         if gf < THREE_HB_FORCE_MIN or gf > THREE_HB_FORCE_MAX:
             raise ValueError(
@@ -373,7 +422,7 @@ class SenselPipe:
                 "(Windows TrackPoint register units)"
             )
         down = gf
-        up = int(round(down * RELEASE_FORCE_RATIO))
+        up = release_force(down, ratio_percent)
         for value, addresses in (
             (
                 down,
@@ -396,7 +445,7 @@ class SenselPipe:
                 self.write_register(address, bytes((value,)), persist=False)
         return down, up
 
-    def commit_trackpoint_click_force(self, gf):
+    def commit_trackpoint_click_force(self, gf, ratio_percent=65):
         """Persist each register right after writing it (see commit_main_click_force)."""
         if gf < THREE_HB_FORCE_MIN or gf > THREE_HB_FORCE_MAX:
             raise ValueError(
@@ -404,7 +453,7 @@ class SenselPipe:
                 "(Windows TrackPoint register units)"
             )
         down = gf
-        up = int(round(down * RELEASE_FORCE_RATIO))
+        up = release_force(down, ratio_percent)
         for value, addresses in (
             (
                 down,
@@ -453,14 +502,20 @@ class SenselPipe:
         return enabled
 
     def print_state(self):
-        print(f"haptic-intensity={self.read_haptic_intensity()}", flush=True)
-        print(f"click-force={self.read_main_click_force()}", flush=True)
+        values = self.read_state_values()
+        print(f"haptic-intensity={values['haptic-intensity']}", flush=True)
+        print(f"click-force={values['click-force']}", flush=True)
+        print(f"click-up={values['click-up']}", flush=True)
         print(
-            f"trackpoint-click-force={self.read_trackpoint_click_force()}",
+            f"trackpoint-click-force={values['trackpoint-click-force']}",
             flush=True,
         )
         print(
-            f"trackpoint-buttons={int(bool(self.read_trackpoint_buttons()))}",
+            f"trackpoint-click-up={values['trackpoint-click-up']}",
+            flush=True,
+        )
+        print(
+            f"trackpoint-buttons={values['trackpoint-buttons']}",
             flush=True,
         )
 
@@ -469,6 +524,9 @@ def main():
     if os.geteuid() != 0:
         print("sensel-haptic-daemon must be run as root", file=sys.stderr)
         return 1
+
+    click_force_ratio = 65
+    trackpoint_force_ratio = 65
 
     if len(sys.argv) == 2:
         mode = "daemon"
@@ -521,7 +579,10 @@ def main():
         if not 0 <= intensity <= 100:
             print("haptic intensity must be an integer from 0 to 100", file=sys.stderr)
             return 2
-    elif len(sys.argv) == 4 and sys.argv[1] == "--preview-click-force":
+    elif (
+        len(sys.argv) in (4, 5)
+        and sys.argv[1] == "--preview-click-force"
+    ):
         mode = "preview-click-force"
         device_path = sys.argv[2]
         try:
@@ -532,7 +593,16 @@ def main():
         if click_force < CLICK_FORCE_MIN or click_force > CLICK_FORCE_MAX or click_force % 2:
             print("click force must be an even value from 2 to 510 Gf", file=sys.stderr)
             return 2
-    elif len(sys.argv) == 4 and sys.argv[1] == "--commit-click-force":
+        if len(sys.argv) == 5:
+            try:
+                click_force_ratio = parse_ratio(sys.argv[4])
+            except ValueError as error:
+                print(str(error), file=sys.stderr)
+                return 2
+    elif (
+        len(sys.argv) in (4, 5)
+        and sys.argv[1] == "--commit-click-force"
+    ):
         mode = "commit-click-force"
         device_path = sys.argv[2]
         try:
@@ -543,7 +613,16 @@ def main():
         if click_force < CLICK_FORCE_MIN or click_force > CLICK_FORCE_MAX or click_force % 2:
             print("click force must be an even value from 2 to 510 Gf", file=sys.stderr)
             return 2
-    elif len(sys.argv) == 4 and sys.argv[1] == "--preview-trackpoint-force":
+        if len(sys.argv) == 5:
+            try:
+                click_force_ratio = parse_ratio(sys.argv[4])
+            except ValueError as error:
+                print(str(error), file=sys.stderr)
+                return 2
+    elif (
+        len(sys.argv) in (4, 5)
+        and sys.argv[1] == "--preview-trackpoint-force"
+    ):
         mode = "preview-trackpoint-force"
         device_path = sys.argv[2]
         try:
@@ -562,7 +641,16 @@ def main():
                 file=sys.stderr,
             )
             return 2
-    elif len(sys.argv) == 4 and sys.argv[1] == "--commit-trackpoint-force":
+        if len(sys.argv) == 5:
+            try:
+                trackpoint_force_ratio = parse_ratio(sys.argv[4])
+            except ValueError as error:
+                print(str(error), file=sys.stderr)
+                return 2
+    elif (
+        len(sys.argv) in (4, 5)
+        and sys.argv[1] == "--commit-trackpoint-force"
+    ):
         mode = "commit-trackpoint-force"
         device_path = sys.argv[2]
         try:
@@ -581,6 +669,12 @@ def main():
                 file=sys.stderr,
             )
             return 2
+        if len(sys.argv) == 5:
+            try:
+                trackpoint_force_ratio = parse_ratio(sys.argv[4])
+            except ValueError as error:
+                print(str(error), file=sys.stderr)
+                return 2
     elif len(sys.argv) == 4 and sys.argv[1] == "--preview-trackpoint-buttons":
         mode = "preview-trackpoint-buttons"
         device_path = sys.argv[2]
@@ -658,17 +752,23 @@ def main():
             file=sys.stderr,
         )
         print(
-            "   or: sensel-haptic-daemon --preview-click-force /dev/hidrawN 2..510 (even Gf)",
+            "   or: sensel-haptic-daemon --preview-click-force /dev/hidrawN 2..510 (even Gf) [release-percent 5..100]",
             file=sys.stderr,
         )
         print(
-            "   or: sensel-haptic-daemon --commit-click-force /dev/hidrawN 2..510 (even Gf)",
+            "   or: sensel-haptic-daemon --commit-click-force /dev/hidrawN 2..510 (even Gf) [release-percent 5..100]",
             file=sys.stderr,
         )
         print("   or: sensel-haptic-daemon --read-trackpoint-force /dev/hidrawN", file=sys.stderr)
         print("   or: sensel-haptic-daemon --write-trackpoint-force /dev/hidrawN 1..255", file=sys.stderr)
-        print("   or: sensel-haptic-daemon --preview-trackpoint-force /dev/hidrawN 1..255", file=sys.stderr)
-        print("   or: sensel-haptic-daemon --commit-trackpoint-force /dev/hidrawN 1..255", file=sys.stderr)
+        print(
+            "   or: sensel-haptic-daemon --preview-trackpoint-force /dev/hidrawN 1..255 [release-percent 5..100]",
+            file=sys.stderr,
+        )
+        print(
+            "   or: sensel-haptic-daemon --commit-trackpoint-force /dev/hidrawN 1..255 [release-percent 5..100]",
+            file=sys.stderr,
+        )
         print("   or: sensel-haptic-daemon --read-trackpoint-buttons /dev/hidrawN", file=sys.stderr)
         print("   or: sensel-haptic-daemon --write-trackpoint-buttons /dev/hidrawN 0|1", file=sys.stderr)
         print("   or: sensel-haptic-daemon --preview-trackpoint-buttons /dev/hidrawN 0|1", file=sys.stderr)
@@ -716,13 +816,13 @@ def main():
 
         if mode == "preview-click-force":
             with SenselPipe(device_path) as pipe:
-                down, up = pipe.preview_main_click_force(click_force)
+                down, up = pipe.preview_main_click_force(click_force, click_force_ratio)
                 print(f"click-down={down}, click-up={up}", flush=True)
             return 0
 
         if mode == "commit-click-force":
             with SenselPipe(device_path) as pipe:
-                down, up = pipe.commit_main_click_force(click_force)
+                down, up = pipe.commit_main_click_force(click_force, click_force_ratio)
                 print(f"click-down={down}, click-up={up}", flush=True)
             return 0
 
@@ -739,13 +839,13 @@ def main():
 
         if mode == "preview-trackpoint-force":
             with SenselPipe(device_path) as pipe:
-                down, up = pipe.preview_trackpoint_click_force(trackpoint_force)
+                down, up = pipe.preview_trackpoint_click_force(trackpoint_force, trackpoint_force_ratio)
                 print(f"trackpoint-click-down={down}, trackpoint-click-up={up}", flush=True)
             return 0
 
         if mode == "commit-trackpoint-force":
             with SenselPipe(device_path) as pipe:
-                down, up = pipe.commit_trackpoint_click_force(trackpoint_force)
+                down, up = pipe.commit_trackpoint_click_force(trackpoint_force, trackpoint_force_ratio)
                 print(f"trackpoint-click-down={down}, trackpoint-click-up={up}", flush=True)
             return 0
 

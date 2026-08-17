@@ -189,5 +189,65 @@ class DraftOperationTests(unittest.TestCase):
         self.pipe.read_register.assert_not_called()
 
 
+class ReleaseRatioTests(unittest.TestCase):
+    """Release (up-register) force derived from a press/ratio pair."""
+
+    def test_default_ratio_matches_windows(self) -> None:
+        self.assertEqual(daemon.release_force(95, 65), 62)
+        self.assertEqual(daemon.release_force(82, 65), 53)
+        self.assertEqual(daemon.release_force(38, 65), 25)
+
+    def test_ratio_bounds(self) -> None:
+        for bad in (4, 101, 0, -10):
+            with self.subTest(ratio=bad):
+                with self.assertRaises(ValueError):
+                    daemon.release_force(100, bad)
+
+    def test_up_register_clamps_into_byte_range(self) -> None:
+        # Tiny down values must still yield a valid 1..255 byte.
+        self.assertEqual(daemon.release_force(1, 5), 1)
+        self.assertEqual(daemon.release_force(1, 100), 1)
+        self.assertEqual(daemon.release_force(2, 100), 2)
+
+    def test_preview_and_commit_accept_ratio(self) -> None:
+        pipe = object.__new__(daemon.SenselPipe)
+        pipe.write_register = Mock()
+        pipe.read_register = Mock()
+
+        self.assertEqual(pipe.preview_main_click_force(164, 80), (82, 66))
+        self.assertEqual(
+            pipe.write_register.call_args_list,
+            [
+                call(daemon.CLICK_DOWN_REGISTER, bytes((82,)), persist=False),
+                call(daemon.CLICK_UP_REGISTER, bytes((66,)), persist=False),
+            ],
+        )
+        pipe.write_register.reset_mock()
+
+        self.assertEqual(pipe.commit_trackpoint_click_force(50, 40), (50, 20))
+        down_calls = pipe.write_register.call_args_list[:3]
+        up_calls = pipe.write_register.call_args_list[3:]
+        self.assertEqual([c.args[1] for c in down_calls], [bytes((50,))] * 3)
+        self.assertEqual([c.args[1] for c in up_calls], [bytes((20,))] * 3)
+
+    def test_parse_ratio_accepts_percent_and_fraction(self) -> None:
+        self.assertEqual(daemon.parse_ratio("65"), 65)
+        self.assertEqual(daemon.parse_ratio("0.65"), 65)
+        self.assertEqual(daemon.parse_ratio("100"), 100)
+        with self.assertRaises(ValueError):
+            daemon.parse_ratio("3")
+        with self.assertRaises(ValueError):
+            daemon.parse_ratio("nan")
+
+    def test_gui_restores_ratio_from_registers(self) -> None:
+        gui = load_script(
+            "sensel_haptic_gui_for_tests", ROOT / "tools/sensel_haptic_gui.py"
+        )
+        self.assertEqual(gui.release_ratio_from_registers(95, 62), 65)
+        self.assertEqual(gui.release_ratio_from_registers(60, 60), 100)
+        self.assertEqual(gui.release_ratio_from_registers(50, 2), 5)
+        self.assertEqual(gui.release_ratio_from_registers(0, 0), 65)
+
+
 if __name__ == "__main__":
     unittest.main()

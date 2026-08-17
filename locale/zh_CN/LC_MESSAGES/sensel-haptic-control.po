@@ -205,6 +205,18 @@ msgid "Default preset loaded as a draft. Adjust it and press Save to keep it."
 msgstr "默认预设已载入为草稿。可继续调整，点“保存”才会写入。"
 
 #: tools/sensel_haptic_gui.py
+msgid "Release ratio: percent of the press force at which the click releases (up register). Windows default: 65."
+msgstr "释放比值：按下力度的百分比，低于该值即释放点击（up 寄存器）。Windows 默认：65。"
+
+#: tools/sensel_haptic_gui.py
+msgid "Click Release Ratio"
+msgstr "点击释放比值"
+
+#: tools/sensel_haptic_gui.py
+msgid "TrackPoint Release Ratio"
+msgstr "TrackPoint 释放比值"
+
+#: tools/sensel_haptic_gui.py
 msgid "Invalid Click Force"
 msgstr "无效的点击力度"
 

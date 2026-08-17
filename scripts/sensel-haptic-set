@@ -81,21 +81,49 @@ elif [ "$#" -eq 3 ] && [ "$1" = "--preview-click-force" ]; then
     device=$2
     usage=
     value=$3
+    ratio=
+elif [ "$#" -eq 4 ] && [ "$1" = "--preview-click-force" ]; then
+    mode=click-preview
+    device=$2
+    usage=
+    value=$3
+    ratio=$4
 elif [ "$#" -eq 3 ] && [ "$1" = "--commit-click-force" ]; then
     mode=click-commit
     device=$2
     usage=
     value=$3
+    ratio=
+elif [ "$#" -eq 4 ] && [ "$1" = "--commit-click-force" ]; then
+    mode=click-commit
+    device=$2
+    usage=
+    value=$3
+    ratio=$4
 elif [ "$#" -eq 3 ] && [ "$1" = "--preview-trackpoint-click-force" ]; then
     mode=trackpoint-preview
     device=$2
     usage=
     value=$3
+    ratio=
+elif [ "$#" -eq 4 ] && [ "$1" = "--preview-trackpoint-click-force" ]; then
+    mode=trackpoint-preview
+    device=$2
+    usage=
+    value=$3
+    ratio=$4
 elif [ "$#" -eq 3 ] && [ "$1" = "--commit-trackpoint-click-force" ]; then
     mode=trackpoint-commit
     device=$2
     usage=
     value=$3
+    ratio=
+elif [ "$#" -eq 4 ] && [ "$1" = "--commit-trackpoint-click-force" ]; then
+    mode=trackpoint-commit
+    device=$2
+    usage=
+    value=$3
+    ratio=$4
 elif [ "$#" -eq 3 ] && [ "$1" = "--preview-trackpoint-buttons" ]; then
     mode=buttons-preview
     device=$2
@@ -125,10 +153,10 @@ else
     echo "   or: sensel-haptic-set --set-intensity /dev/hidrawN 0..100" >&2
     echo "   or: sensel-haptic-set --preview-intensity /dev/hidrawN 0..100" >&2
     echo "   or: sensel-haptic-set --commit-intensity /dev/hidrawN 0..100" >&2
-    echo "   or: sensel-haptic-set --preview-click-force /dev/hidrawN 2..510" >&2
-    echo "   or: sensel-haptic-set --commit-click-force /dev/hidrawN 2..510" >&2
-    echo "   or: sensel-haptic-set --preview-trackpoint-click-force /dev/hidrawN 1..255" >&2
-    echo "   or: sensel-haptic-set --commit-trackpoint-click-force /dev/hidrawN 1..255" >&2
+    echo "   or: sensel-haptic-set --preview-click-force /dev/hidrawN 2..510 [release-percent 5..100]" >&2
+    echo "   or: sensel-haptic-set --commit-click-force /dev/hidrawN 2..510 [release-percent 5..100]" >&2
+    echo "   or: sensel-haptic-set --preview-trackpoint-click-force /dev/hidrawN 1..255 [release-percent 5..100]" >&2
+    echo "   or: sensel-haptic-set --commit-trackpoint-click-force /dev/hidrawN 1..255 [release-percent 5..100]" >&2
     echo "   or: sensel-haptic-set --preview-trackpoint-buttons /dev/hidrawN 0|1" >&2
     echo "   or: sensel-haptic-set --commit-trackpoint-buttons /dev/hidrawN 0|1" >&2
     exit 2
@@ -255,11 +283,28 @@ if [ "$mode" = click-preview ] || [ "$mode" = click-commit ]; then
         echo "click force must be an even value from 2 to 510 Gf" >&2
         exit 2
     fi
+    ratio_args=
+    if [ -n "$ratio" ]; then
+        case "$ratio" in ''|*[!0-9]*) echo "release ratio must be an integer from 5 to 100 (percent)" >&2; exit 2 ;; esac
+        if [ "$ratio" -lt 5 ] || [ "$ratio" -gt 100 ]; then
+            echo "release ratio must be an integer from 5 to 100 (percent)" >&2
+            exit 2
+        fi
+        ratio_args=$ratio
+    fi
     [ -x "$daemon" ] || { echo "Sensel HID daemon was not installed" >&2; exit 1; }
     if [ "$mode" = click-preview ]; then
-        exec "$daemon" --preview-click-force "$device" "$value"
+        if [ -n "$ratio_args" ]; then
+            exec "$daemon" --preview-click-force "$device" "$value" "$ratio_args"
+        else
+            exec "$daemon" --preview-click-force "$device" "$value"
+        fi
     else
-        exec "$daemon" --commit-click-force "$device" "$value"
+        if [ -n "$ratio_args" ]; then
+            exec "$daemon" --commit-click-force "$device" "$value" "$ratio_args"
+        else
+            exec "$daemon" --commit-click-force "$device" "$value"
+        fi
     fi
 fi
 
@@ -269,11 +314,28 @@ if [ "$mode" = trackpoint-preview ] || [ "$mode" = trackpoint-commit ]; then
         echo "TrackPoint click force must be a value from 1 to 255" >&2
         exit 2
     fi
+    ratio_args=
+    if [ -n "$ratio" ]; then
+        case "$ratio" in ''|*[!0-9]*) echo "release ratio must be an integer from 5 to 100 (percent)" >&2; exit 2 ;; esac
+        if [ "$ratio" -lt 5 ] || [ "$ratio" -gt 100 ]; then
+            echo "release ratio must be an integer from 5 to 100 (percent)" >&2
+            exit 2
+        fi
+        ratio_args=$ratio
+    fi
     [ -x "$daemon" ] || { echo "Sensel HID daemon was not installed" >&2; exit 1; }
     if [ "$mode" = trackpoint-preview ]; then
-        exec "$daemon" --preview-trackpoint-force "$device" "$value"
+        if [ -n "$ratio_args" ]; then
+            exec "$daemon" --preview-trackpoint-force "$device" "$value" "$ratio_args"
+        else
+            exec "$daemon" --preview-trackpoint-force "$device" "$value"
+        fi
     else
-        exec "$daemon" --commit-trackpoint-force "$device" "$value"
+        if [ -n "$ratio_args" ]; then
+            exec "$daemon" --commit-trackpoint-force "$device" "$value" "$ratio_args"
+        else
+            exec "$daemon" --commit-trackpoint-force "$device" "$value"
+        fi
     fi
 fi
 

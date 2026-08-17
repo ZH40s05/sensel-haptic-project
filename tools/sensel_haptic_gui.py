@@ -42,11 +42,18 @@ CLICK_FORCE_MIN = 1
 CLICK_FORCE_MAX = 255
 TRACKPOINT_FORCE_MIN = 1
 TRACKPOINT_FORCE_MAX = 255
+# Release (up-register) force as a percentage of the press (down-register)
+# force.  Windows hardcodes 65; the GUI exposes 5..100 so the up value stays
+# a valid 1..255 register byte for every down value.
+RELEASE_RATIO_MIN = 5
+RELEASE_RATIO_MAX = 100
+RELEASE_RATIO_DEFAULT = 65
 # Windows "Medium" preset used by the global Reset button (issue #1).
 RESET_INTENSITY = 71
 RESET_CLICK_FORCE = 82
 RESET_TRACKPOINT_FORCE = 38
 RESET_TRACKPOINT_BUTTONS = False
+RESET_RELEASE_RATIO = 65
 
 
 def _translation_directories() -> list[Path]:
@@ -156,6 +163,14 @@ def intensity_to_level(raw: int) -> int:
     return min(range(10), key=lambda index: abs(INTENSITY_LEVELS[index] - raw)) + 1
 
 
+def release_ratio_from_registers(down: int, up: int) -> int:
+    """Best-matching ratio percent for the device's down/up registers."""
+    if down <= 0:
+        return RELEASE_RATIO_DEFAULT
+    ratio = round(up * 100.0 / down)
+    return max(RELEASE_RATIO_MIN, min(RELEASE_RATIO_MAX, ratio))
+
+
 def find_sensel_devices() -> list[tuple[str, str]]:
     devices: list[tuple[str, str]] = []
     sysfs_root = Path("/sys/class/hidraw")
@@ -200,7 +215,6 @@ def parse_state(output: str) -> dict[str, int]:
             _("Privileged helper returned an invalid TrackPoint button state")
         )
     return state
-
 
 def run_helper(arguments: list[str]) -> str:
     if not os.path.isfile(HELPER) or not os.access(HELPER, os.X_OK):
@@ -288,6 +302,8 @@ class SenselHapticApp:
         self.trackpoint_force_applied: Optional[int] = None
         self.intensity_applied: Optional[int] = None
         self.buttons_applied: Optional[int] = None
+        self.click_ratio_applied: Optional[int] = None
+        self.trackpoint_ratio_applied: Optional[int] = None
 
         self.device_var = tk.StringVar()
         self.haptic_feedback_var = tk.BooleanVar(value=False)
@@ -298,6 +314,10 @@ class SenselHapticApp:
         self.trackpoint_buttons_var = tk.BooleanVar(value=False)
         self.trackpoint_force_var = tk.IntVar(value=60)
         self.trackpoint_force_value_var = tk.StringVar(value="60")
+        self.click_ratio_var = tk.IntVar(value=RELEASE_RATIO_DEFAULT)
+        self.click_ratio_value_var = tk.StringVar(value=str(RELEASE_RATIO_DEFAULT))
+        self.trackpoint_ratio_var = tk.IntVar(value=RELEASE_RATIO_DEFAULT)
+        self.trackpoint_ratio_value_var = tk.StringVar(value=str(RELEASE_RATIO_DEFAULT))
         self.status_var = tk.StringVar(value=_("Looking for a Sensel Haptic Touchpad…"))
         self.dirty_var = tk.BooleanVar(value=False)
 
@@ -435,6 +455,33 @@ class SenselHapticApp:
         self.click_force_entry.grid(row=1, column=1, padx=(10, 6))
         self.click_force_entry.bind("<Return>", self._apply_click_force_entry)
         self.click_force_entry.bind("<FocusOut>", self._apply_click_force_entry)
+        ttk.Label(
+            click_frame,
+            text=_(
+                "Release ratio: percent of the press force at which the "
+                "click releases (up register). Windows default: 65."
+            ),
+            foreground="#555555",
+            wraplength=680,
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 4))
+        self.click_ratio_scale = tk.Scale(
+            click_frame,
+            from_=RELEASE_RATIO_MIN,
+            to=RELEASE_RATIO_MAX,
+            resolution=1,
+            orient="horizontal",
+            showvalue=False,
+            highlightthickness=0,
+            variable=self.click_ratio_var,
+            command=self._click_ratio_changed,
+        )
+        self.click_ratio_scale.grid(row=4, column=0, sticky="ew")
+        self.click_ratio_scale.bind("<ButtonRelease-1>", self._click_ratio_slider_released)
+        self.click_ratio_scale.bind("<KeyRelease>", self._click_ratio_slider_released)
+        self.click_ratio_value_label = ttk.Label(
+            click_frame, textvariable=self.click_ratio_value_var, width=4, anchor="center"
+        )
+        self.click_ratio_value_label.grid(row=4, column=1, padx=(10, 0))
 
         buttons_frame = ttk.LabelFrame(outer, text=_("TrackPoint Buttons"), padding=10)
         buttons_frame.pack(fill="x", pady=(0, 10))
@@ -494,6 +541,40 @@ class SenselHapticApp:
         self.trackpoint_force_entry.bind(
             "<FocusOut>", self._apply_trackpoint_force_entry
         )
+        ttk.Label(
+            trackpoint_frame,
+            text=_(
+                "Release ratio: percent of the press force at which the "
+                "click releases (up register). Windows default: 65."
+            ),
+            foreground="#555555",
+            wraplength=680,
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 4))
+        self.trackpoint_ratio_scale = tk.Scale(
+            trackpoint_frame,
+            from_=RELEASE_RATIO_MIN,
+            to=RELEASE_RATIO_MAX,
+            resolution=1,
+            orient="horizontal",
+            showvalue=False,
+            highlightthickness=0,
+            variable=self.trackpoint_ratio_var,
+            command=self._trackpoint_ratio_changed,
+        )
+        self.trackpoint_ratio_scale.grid(row=4, column=0, sticky="ew")
+        self.trackpoint_ratio_scale.bind(
+            "<ButtonRelease-1>", self._trackpoint_ratio_slider_released
+        )
+        self.trackpoint_ratio_scale.bind(
+            "<KeyRelease>", self._trackpoint_ratio_slider_released
+        )
+        self.trackpoint_ratio_value_label = ttk.Label(
+            trackpoint_frame,
+            textvariable=self.trackpoint_ratio_value_var,
+            width=4,
+            anchor="center",
+        )
+        self.trackpoint_ratio_value_label.grid(row=4, column=1, padx=(10, 0))
 
         # Global draft controls: previews are RAM-only; Save persists every
         # changed register, Cancel restores the last saved state, Reset loads
@@ -548,11 +629,13 @@ class SenselHapticApp:
         self.haptic_switch.configure(state=state)
         self.click_force_scale.configure(state=state)
         self.click_force_entry.configure(state=state)
+        self.click_ratio_scale.configure(state=state)
         self.trackpoint_buttons_switch.configure(state=state)
         trackpoint_state = (
             "normal" if available and self.trackpoint_buttons_var.get() else "disabled"
         )
         self.trackpoint_force_entry.configure(state=trackpoint_state)
+        self.trackpoint_ratio_scale.configure(state=trackpoint_state)
         self.intensity_scale.configure(
             state="normal" if available and self.haptic_feedback_var.get() else "disabled"
         )
@@ -575,7 +658,9 @@ class SenselHapticApp:
         return {
             "intensity": intensity,
             "click-force": self.click_force_var.get(),
+            "click-ratio": self.click_ratio_var.get(),
             "trackpoint-force": self.trackpoint_force_var.get(),
+            "trackpoint-ratio": self.trackpoint_ratio_var.get(),
             "buttons": 1 if self.trackpoint_buttons_var.get() else 0,
         }
 
@@ -585,9 +670,15 @@ class SenselHapticApp:
             "click-force": self.click_force_applied
             if self.click_force_applied is not None
             else self.click_force_var.get(),
+            "click-ratio": self.click_ratio_applied
+            if self.click_ratio_applied is not None
+            else self.click_ratio_var.get(),
             "trackpoint-force": self.trackpoint_force_applied
             if self.trackpoint_force_applied is not None
             else self.trackpoint_force_var.get(),
+            "trackpoint-ratio": self.trackpoint_ratio_applied
+            if self.trackpoint_ratio_applied is not None
+            else self.trackpoint_ratio_var.get(),
             "buttons": self.buttons_applied
             if self.buttons_applied is not None
             else (1 if self.trackpoint_buttons_var.get() else 0),
@@ -716,6 +807,17 @@ class SenselHapticApp:
             min(TRACKPOINT_FORCE_MAX, state["trackpoint-click-force"]),
         )
         buttons = bool(state["trackpoint-buttons"])
+        # Recover the release ratios from the up/down register pairs; older
+        # helpers do not report the up registers, so keep the default then.
+        click_ratio = release_ratio_from_registers(
+            click_force, state.get("click-up", int(round(click_force * 0.65)))
+        )
+        trackpoint_ratio = release_ratio_from_registers(
+            trackpoint_force,
+            state.get(
+                "trackpoint-click-up", int(round(trackpoint_force * 0.65))
+            ),
+        )
 
         self.syncing = True
         self.haptic_feedback_var.set(haptic_enabled)
@@ -723,15 +825,21 @@ class SenselHapticApp:
         self.intensity_value_var.set(str(intensity_level))
         self.click_force_var.set(click_force)
         self.click_force_value_var.set(str(click_force))
+        self.click_ratio_var.set(click_ratio)
+        self.click_ratio_value_var.set(str(click_ratio))
         self.trackpoint_buttons_var.set(buttons)
         self.trackpoint_force_var.set(trackpoint_force)
         self.trackpoint_force_value_var.set(str(trackpoint_force))
+        self.trackpoint_ratio_var.set(trackpoint_ratio)
+        self.trackpoint_ratio_value_var.set(str(trackpoint_ratio))
         self.syncing = False
 
         # The RAM copy matches flash after a fresh read: the draft starts clean.
         self.intensity_applied = intensity
         self.click_force_applied = click_force
+        self.click_ratio_applied = click_ratio
         self.trackpoint_force_applied = trackpoint_force
+        self.trackpoint_ratio_applied = trackpoint_ratio
         self.buttons_applied = int(buttons)
         if intensity > 0:
             save_haptic_preferences(intensity, True)
@@ -831,12 +939,17 @@ class SenselHapticApp:
         self.click_force_value_var.set(str(click_force))
         self.syncing = False
         self._update_dirty_state()
-        if self.click_force_applied == click_force or self.saving:
+        if self.click_force_applied == click_force and self.saving:
             return
         # The helper accepts main Click Force in physical Gf.  The GUI
         # value is the raw register, so convert it back to Gf here.
         self._preview(
-            ["--preview-click-force", self.device_path or "", str(click_force * 2)],
+            [
+                "--preview-click-force",
+                self.device_path or "",
+                str(click_force * 2),
+                str(self.click_ratio_var.get()),
+            ],
             _("Click Force"),
         )
 
@@ -893,16 +1006,68 @@ class SenselHapticApp:
         self.trackpoint_force_value_var.set(str(trackpoint_force))
         self.syncing = False
         self._update_dirty_state()
-        if self.trackpoint_force_applied == trackpoint_force or self.saving:
+        if self.trackpoint_force_applied == trackpoint_force and self.saving:
             return
         self._preview(
             [
                 "--preview-trackpoint-click-force",
                 self.device_path or "",
                 str(trackpoint_force),
+                str(self.trackpoint_ratio_var.get()),
             ],
             _("TrackPoint Click Force"),
         )
+
+    def _click_ratio_changed(self, value: str) -> None:
+        ratio = max(
+            RELEASE_RATIO_MIN, min(RELEASE_RATIO_MAX, int(round(float(value))))
+        )
+        self.click_ratio_value_var.set(str(ratio))
+        if self.syncing or not self.loaded:
+            self._update_dirty_state()
+            return
+        self._update_dirty_state()
+        if self.click_ratio_applied == ratio or self.saving:
+            return
+        self._preview(
+            [
+                "--preview-click-force",
+                self.device_path or "",
+                str(self.click_force_var.get() * 2),
+                str(ratio),
+            ],
+            _("Click Release Ratio"),
+        )
+
+    def _click_ratio_slider_released(self, _event=None) -> None:
+        # tk.Scale fires the command continuously while dragging; the helper
+        # write is issued from the change handler only on release via this
+        # indirection to avoid hammering the device mid-drag.
+        pass
+
+    def _trackpoint_ratio_changed(self, value: str) -> None:
+        ratio = max(
+            RELEASE_RATIO_MIN, min(RELEASE_RATIO_MAX, int(round(float(value))))
+        )
+        self.trackpoint_ratio_value_var.set(str(ratio))
+        if self.syncing or not self.loaded:
+            self._update_dirty_state()
+            return
+        self._update_dirty_state()
+        if self.trackpoint_ratio_applied == ratio or self.saving:
+            return
+        self._preview(
+            [
+                "--preview-trackpoint-click-force",
+                self.device_path or "",
+                str(self.trackpoint_force_var.get()),
+                str(ratio),
+            ],
+            _("TrackPoint Release Ratio"),
+        )
+
+    def _trackpoint_ratio_slider_released(self, _event=None) -> None:
+        pass
 
     # ------------------------------------------------------------------
     # Global Save / Cancel / Reset
@@ -921,20 +1086,24 @@ class SenselHapticApp:
                     str(draft["intensity"]),
                 )
             )
-        if draft["click-force"] != saved["click-force"]:
+        if draft["click-force"] != saved["click-force"] or (
+            draft["click-ratio"] != saved["click-ratio"]
+        ):
             operations.append(
                 (
                     _("Click Force"),
                     "--commit-click-force",
-                    str(draft["click-force"] * 2),
+                    f"{draft['click-force'] * 2} {draft['click-ratio']}",
                 )
             )
-        if draft["trackpoint-force"] != saved["trackpoint-force"]:
+        if draft["trackpoint-force"] != saved["trackpoint-force"] or (
+            draft["trackpoint-ratio"] != saved["trackpoint-ratio"]
+        ):
             operations.append(
                 (
                     _("TrackPoint Click Force"),
                     "--commit-trackpoint-click-force",
-                    str(draft["trackpoint-force"]),
+                    f"{draft['trackpoint-force']} {draft['trackpoint-ratio']}",
                 )
             )
         if draft["buttons"] != saved["buttons"]:
@@ -989,7 +1158,9 @@ class SenselHapticApp:
                 draft = self._current_draft()
                 self.intensity_applied = draft["intensity"]
                 self.click_force_applied = draft["click-force"]
+                self.click_ratio_applied = draft["click-ratio"]
                 self.trackpoint_force_applied = draft["trackpoint-force"]
+                self.trackpoint_ratio_applied = draft["trackpoint-ratio"]
                 self.buttons_applied = draft["buttons"]
                 if draft["intensity"] > 0:
                     save_haptic_preferences(draft["intensity"], True)
@@ -998,7 +1169,7 @@ class SenselHapticApp:
                 self._set_status(_("All changes saved to the device."))
 
         self.worker.submit(
-            [operations[index][1], self.device_path or "", operations[index][2]],
+            [operations[index][1], self.device_path or "", *operations[index][2].split()],
             finished,
         )
 
@@ -1013,9 +1184,13 @@ class SenselHapticApp:
             self.haptic_feedback_var.set(False)
         self.click_force_var.set(saved["click-force"])
         self.click_force_value_var.set(str(saved["click-force"]))
+        self.click_ratio_var.set(saved["click-ratio"])
+        self.click_ratio_value_var.set(str(saved["click-ratio"]))
         self.trackpoint_buttons_var.set(bool(saved["buttons"]))
         self.trackpoint_force_var.set(saved["trackpoint-force"])
         self.trackpoint_force_value_var.set(str(saved["trackpoint-force"]))
+        self.trackpoint_ratio_var.set(saved["trackpoint-ratio"])
+        self.trackpoint_ratio_value_var.set(str(saved["trackpoint-ratio"]))
         self.syncing = False
         self._set_controls_state(True)
         # Re-preview each saved value so device RAM matches flash again.
@@ -1024,7 +1199,12 @@ class SenselHapticApp:
             _("Haptics Intensity"),
         )
         self._preview(
-            ["--preview-click-force", self.device_path or "", str(saved["click-force"] * 2)],
+            [
+                "--preview-click-force",
+                self.device_path or "",
+                str(saved["click-force"] * 2),
+                str(saved["click-ratio"]),
+            ],
             _("Click Force"),
         )
         self._preview(
@@ -1032,6 +1212,7 @@ class SenselHapticApp:
                 "--preview-trackpoint-click-force",
                 self.device_path or "",
                 str(saved["trackpoint-force"]),
+                str(saved["trackpoint-ratio"]),
             ],
             _("TrackPoint Click Force"),
         )
@@ -1050,9 +1231,13 @@ class SenselHapticApp:
         self.saved_intensity = RESET_INTENSITY
         self.click_force_var.set(RESET_CLICK_FORCE)
         self.click_force_value_var.set(str(RESET_CLICK_FORCE))
+        self.click_ratio_var.set(RESET_RELEASE_RATIO)
+        self.click_ratio_value_var.set(str(RESET_RELEASE_RATIO))
         self.trackpoint_buttons_var.set(RESET_TRACKPOINT_BUTTONS)
         self.trackpoint_force_var.set(RESET_TRACKPOINT_FORCE)
         self.trackpoint_force_value_var.set(str(RESET_TRACKPOINT_FORCE))
+        self.trackpoint_ratio_var.set(RESET_RELEASE_RATIO)
+        self.trackpoint_ratio_value_var.set(str(RESET_RELEASE_RATIO))
         self.syncing = False
         self._set_controls_state(True)
         # Preview the preset like any other draft change.
@@ -1062,11 +1247,21 @@ class SenselHapticApp:
                 _("Haptics Intensity"),
             )
             self._preview(
-                ["--preview-click-force", self.device_path or "", str(RESET_CLICK_FORCE * 2)],
+                [
+                    "--preview-click-force",
+                    self.device_path or "",
+                    str(RESET_CLICK_FORCE * 2),
+                    str(RESET_RELEASE_RATIO),
+                ],
                 _("Click Force"),
             )
             self._preview(
-                ["--preview-trackpoint-click-force", self.device_path or "", str(RESET_TRACKPOINT_FORCE)],
+                [
+                    "--preview-trackpoint-click-force",
+                    self.device_path or "",
+                    str(RESET_TRACKPOINT_FORCE),
+                    str(RESET_RELEASE_RATIO),
+                ],
                 _("TrackPoint Click Force"),
             )
             self._preview(
