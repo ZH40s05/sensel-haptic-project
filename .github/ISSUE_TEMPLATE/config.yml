@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 在线 WebHID 面板 / Live WebHID panel
+    url: https://zh40s05.github.io/sensel-haptic-project/
+    about: 直接打开跨平台控制面板 / Open the cross-platform control panel
+  - name: 文档 / Documentation
+    url: https://github.com/ZH40s05/sensel-haptic-project#readme
+    about: 先查看安装、兼容性和排障说明 / Check installation, compatibility, and troubleshooting first

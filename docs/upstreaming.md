@@ -36,6 +36,20 @@ that can be submitted unchanged to one upstream project.
 The Python daemon, private register map, Fedora installer, and GNOME patch
 should remain project-specific until a lower-level upstream API exists.
 
+### WebHID 面板的位置 / Where the WebHID panel fits
+
+WebHID 面板天然面向跨平台用户，不属于任何单一发行版，也不依赖 Fedora
+打包链。它更适合作为本项目的长期主入口保留在仓库内：协议与假固件测试
+已是双实现（Python/Node），若将来 W3C WebHID 进入候选推荐或有更标准的
+HID 触觉 API，再评估是否收敛到标准接口。
+
+The WebHID panel targets cross-platform users, belongs to no single
+distribution, and does not depend on Fedora packaging. It is best kept
+in-repo as the project's long-term primary entry point: the protocol and
+fake-firmware tests are already dual-implementation (Python/Node); if
+WebHID reaches Candidate Recommendation or a standard HID-haptics API
+emerges, converging on the standard interface can be evaluated then.
+
 ## 上游提案前的审查清单 / Review checklist before an upstream proposal
 
 - 说明用户可见问题与受影响设备 / state the user-visible problem and

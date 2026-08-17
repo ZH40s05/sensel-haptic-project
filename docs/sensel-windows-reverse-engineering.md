@@ -144,22 +144,20 @@ sudo python3 tools/sensel-hid-pipe.py set-haptic-intensity 50
 
 写入私有寄存器可能影响触摸板的按键行为；建议先记录 `read` 结果，并优先使用 `--no-persist` 做临时测试。
 
-## GNOME 设置注入 / GNOME Settings integration
+## 当前项目如何使用这些发现 / Current project use
 
-GNOME 设置的“鼠标/触控板”面板复用了反馈强度的特权 helper 链路：
+当前 GNOME、Tk 和 WebHID 入口都复用上面的寄存器映射；它们的用户操作、安装
+方式和权限模型分别记录在 [README](../README.md)、[架构说明](architecture.md)
+和 [WebHID 使用说明](webhid.md) 中。
 
-- “触觉反馈”直接读写 `0x00AB`，与 Windows 的 `ptp_haptic_intensity` 寄存器一致；界面档位为 1～10，按 `[32, 45, 55, 63, 71, 77, 84, 89, 95, 100]` 非线性映射。
-- “点击力度”提供 Windows 控制面板同样的 `Low / Medium / High` 三档，底层对应 `120 / 164 / 190 Gf`。
-- “TrackPoint 按钮”和 “TrackPoint 点击力度”分别对应 `0x008A` 与 `Low / Medium / High` 三档，底层寄存器值为 `28 / 38 / 60`。
-- 读取完整状态通过 `sensel-haptic-set --get-state` 完成（含 `click-up` / `trackpoint-click-up`，供 GUI 反推释放比值）。
+The GNOME, Tk, and WebHID entry points all reuse the register map above. Their
+user workflows, installation, and permission models are documented in the
+[README](../README.md), [architecture guide](architecture.md), and
+[WebHID guide](webhid.md).
 
-## 独立 GUI 精确调节 / Standalone GUI fine adjustment
+独立 GUI 额外支持 `1..255` 的原始力度值和 5%–100% 释放比值；这些值仍受单字节
+寄存器上限约束，超出 Windows 预设范围后应逐步调节并保留可恢复的当前值。
 
-独立控制面板 `sensel-haptic-control` 提供连续范围与草稿式编辑：
-
-- `Click Force`：界面显示主点击按下寄存器原始值 `1..255`；写入 helper 时转换为 `Gf = raw * 2`，释放值按所选比值（默认 65%，可调 5..100%）计算写入 `0x0090`。Windows 的 `120 / 164 / 190 Gf` 预设在此界面显示为 `60 / 82 / 95`。
-- `TrackPoint Click Force`：输入范围为 `1..255` 的 Windows 3HB 原始寄存器单位；三个按下寄存器直接写入该值，三个释放寄存器按所选比值写入。
-- 释放比值 / release ratio：两个力度组各有一条 5..100% 比值滑条，实时预览 up 寄存器。
-- 草稿模型 / draft model：改动经 `--preview-*` 只写 RAM 即时预览；“保存”仅对改动项逐个 提交（`--commit-*`，写→存交错）；“取消”把 RAM 恢复为已保存值；“重置”载入当前首选预设。
-
-两组寄存器都可以接受超过 Windows 图形界面预设的值；`255` 是单字节寄存器的写入上限。超过 Windows 校准范围后，实际手感和固件行为不再由 Windows 预设覆盖，建议逐步调节并保留可恢复的当前值。
+The standalone GUI additionally exposes raw force values from `1..255` and
+5%–100% release ratios. The one-byte register limit still applies; values beyond
+the Windows presets should be changed gradually with a recoverable baseline.

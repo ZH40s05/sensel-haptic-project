@@ -17,6 +17,7 @@ flowchart LR
     auth[pkexec and Polkit]
     helper[Root-owned sensel-haptic-set]
     daemon[sensel-haptic-daemon]
+    web[WebHID web panel<br>Chromium browser]
     hid[/dev/hidrawN]
     device[Sensel haptic touchpad]
 
@@ -25,6 +26,7 @@ flowchart LR
     auth --> helper
     helper --> daemon
     daemon --> hid
+    web -->|WebHID, no root| hid
     hid --> device
 ```
 
@@ -106,19 +108,26 @@ This is a developer diagnostic tool. It exposes raw register reads and
 explicitly opt-in writes for protocol investigation. It should not be used
 as the normal desktop configuration entry point.
 
+### `tools/sensel-haptic-web.html`
+
+WebHID 面板是无依赖、无后端的第三个入口，通过浏览器直接复用同一寄存器协议。
+它不经过 root helper；协议适配和浏览器权限细节见
+[WebHID 使用说明 / WebHID guide](webhid.md)。
+
+The WebHID panel is a dependency-free, backend-free third entry point that reuses
+the same register protocol directly from the browser. It bypasses the root helper;
+see the [WebHID guide](webhid.md) for protocol adaptation and browser permissions.
+
 ## 特权边界 / Privilege boundary
 
-GUI 与 GNOME 面板无特权。正常配置路径只在 helper 与 daemon 中打开
-hidraw 节点。诊断工具也能打开它，但只作为显式调用的开发者操作。Polkit
-规则授权本地活跃 `wheel` 用户调用已安装的 helper；helper 自身仍校验设
-备、操作与取值。
+GUI 与 GNOME 面板无特权。正常桌面路径只在 helper 与 daemon 中打开 hidraw
+节点；诊断工具仅作为显式的开发者操作使用。Polkit 规则授权本地活跃 `wheel`
+用户调用已安装的 helper，而 helper 仍自行校验设备、操作与取值。
 
-The GUI and GNOME panel are unprivileged. The normal configuration path
-opens the hidraw node only in the helper and daemon. The diagnostic tool
-can also open it, but only as an explicitly invoked developer operation.
-The Polkit rule grants the active local `wheel` user permission to invoke
-the installed helper; the helper still validates the device, operation, and
-value itself.
+The GUI and GNOME panel are unprivileged. The normal desktop path opens hidraw
+only in the helper and daemon; the diagnostic tool is for explicit developer use.
+Polkit grants the active local `wheel` user access to the installed helper, while
+the helper still validates the device, operation, and value itself.
 
 本项目不试图替代 libinput 或内核驱动。可上游化的未来设计会把这一设备
 专属后端与通用指针事件处理分开，向桌面设置暴露稳定的系统 API，而不是

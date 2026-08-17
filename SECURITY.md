@@ -24,3 +24,9 @@ repository maintainer and include:
 
 Do not run the installer on a production workstation without reviewing the
 files installed under /usr/local/libexec and /etc/polkit-1/rules.d.
+
+WebHID 的浏览器来源、设备选择器和页面安全注意事项见
+[WebHID 使用说明 / WebHID guide](docs/webhid.md)。
+
+Browser-origin, device-picker, and page-safety guidance for WebHID lives in the
+[WebHID guide](docs/webhid.md).
