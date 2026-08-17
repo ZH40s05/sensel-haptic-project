@@ -43,8 +43,8 @@ msgid "Sensel Haptic Touchpad"
 msgstr "Sensel 触觉触摸板"
 
 #: tools/sensel_haptic_gui.py
-msgid "Looking for a Sensel Haptic Touchpad…"
-msgstr "正在查找 Sensel 触觉触摸板…"
+msgid "Looking for a Sensel touchpad…"
+msgstr "正在查找 Sensel 触摸板…"
 
 #: tools/sensel_haptic_gui.py
 msgid "Touchpad Settings"
@@ -99,8 +99,8 @@ msgid "Fine adjustment: 1–255 Windows 3HB register units. Windows presets: 28 
 msgstr "精细调节：1–255 个 Windows 3HB 寄存器单位。Windows 预设：28 / 38 / 60。"
 
 #: tools/sensel_haptic_gui.py
-msgid "Sensel Haptic Touchpad was not detected. Check the connection and click Refresh."
-msgstr "未检测到 Sensel 触觉触摸板。请检查设备连接，然后点击“刷新”。"
+msgid "Sensel touchpad not found. Check the connection and click Refresh."
+msgstr "未找到 Sensel 触摸板。请检查连接并点击“刷新”。"
 
 #: tools/sensel_haptic_gui.py
 msgid "Reading settings from the device…"
@@ -171,12 +171,12 @@ msgstr "预览{label}失败：{error}"
 
 #, python-brace-format
 #: tools/sensel_haptic_gui.py
-msgid "Previewing {label}. Press Save to keep it."
-msgstr "正在预览{label}。点“保存”才会写入。"
+msgid "Previewing {label}; press Save to keep."
+msgstr "正在预览{label}；点“保存”写入。"
 
 #: tools/sensel_haptic_gui.py
-msgid "Settings read from the device. Changes are previewed immediately; press Save to write them permanently."
-msgstr "已从设备读取设置。改动会即时预览，点“保存”才会永久写入。"
+msgid "Settings loaded. Changes are previewed; press Save to keep them."
+msgstr "设置已读取；改动会预览，点“保存”写入。"
 
 #, python-brace-format
 #: tools/sensel_haptic_gui.py
@@ -193,16 +193,16 @@ msgid "Save failed"
 msgstr "保存失败"
 
 #: tools/sensel_haptic_gui.py
-msgid "All changes saved to the device."
-msgstr "所有更改已保存到设备。"
+msgid "Saved to device."
+msgstr "已保存到设备。"
 
 #: tools/sensel_haptic_gui.py
-msgid "Changes discarded; the device keeps its saved settings."
-msgstr "已放弃更改；设备保留已保存的设置。"
+msgid "Changes cancelled; saved settings kept."
+msgstr "已取消更改；保留原设置。"
 
 #: tools/sensel_haptic_gui.py
-msgid "Default preset loaded as a draft. Adjust it and press Save to keep it."
-msgstr "默认预设已载入为草稿。可继续调整，点“保存”才会写入。"
+msgid "Defaults loaded as a draft; press Save to keep."
+msgstr "默认值已载入草稿；点“保存”写入。"
 
 #: tools/sensel_haptic_gui.py
 msgid "Release ratio: percent of the press force at which the click releases (up register). Windows default: 65."

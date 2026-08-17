@@ -28,7 +28,8 @@ let js = match[1];
 js = js.replace("if (!navigator.hid) {", "if (false) {");
 js += "\n;globalThis.__exports = { SenselPipe, releaseForce, ratioFromRegisters," +
       " levelToRaw, rawToLevel, REG, readState, previewClickForce," +
-      " commitClickForce, previewTpForce, commitTpForce };\n";
+      " commitClickForce, previewTpForce, commitTpForce, ui, currentDraft," +
+      " applyState, refreshDirty };\n";
 
 class FakeSensel {
   constructor() {
@@ -174,6 +175,46 @@ try {
     "ratioFromRegisters round-trips and clamps");
   check(E.levelToRaw(5) === 71 && E.rawToLevel(71) === 5,
     "intensity level mapping");
+
+  // Reset must work from a clean, non-default state and leave the saved
+  // baseline untouched until Save is pressed.
+  E.ui.pipe = pipe;
+  E.ui.device = fake;
+  E.ui.loaded = true;
+  E.ui.saving = false;
+  E.ui.previewing = false;
+  const nonDefault = {
+    intensity: 55, clickForce: 90, clickRatio: 80,
+    tpForce: 50, tpRatio: 40, tpButtons: true,
+  };
+  E.ui.saved = nonDefault;
+  E.applyState(nonDefault);
+  E.refreshDirty();
+  check(!E.ui.dirty, "clean non-default state starts clean");
+  await context.document.getElementById("reset-btn").onclick();
+  check(E.currentDraft().intensity === 100 && E.currentDraft().clickForce === 60 &&
+        E.currentDraft().clickRatio === 65 && E.currentDraft().tpForce === 120 &&
+        E.currentDraft().tpRatio === 65 && E.currentDraft().tpButtons === true,
+        "reset applies the complete default draft from a clean state");
+  check(E.ui.dirty && E.ui.saved === nonDefault,
+    "reset marks the draft dirty without changing the saved baseline");
+
+  // Resetting back to an already-saved default must clear dirty state.
+  const defaults = {
+    intensity: 100, clickForce: 60, clickRatio: 65,
+    tpForce: 120, tpRatio: 65, tpButtons: true,
+  };
+  E.ui.saved = defaults;
+  E.applyState({
+    intensity: 55, clickForce: 90, clickRatio: 80,
+    tpForce: 50, tpRatio: 40, tpButtons: false,
+  });
+  E.refreshDirty();
+  await context.document.getElementById("reset-btn").onclick();
+  check(!E.ui.dirty &&
+        context.document.getElementById("save-btn").disabled &&
+        context.document.getElementById("cancel-btn").disabled,
+        "reset clears dirty state when defaults are already saved");
 } finally {
   pipe.close();
 }

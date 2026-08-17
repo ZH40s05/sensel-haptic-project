@@ -7,7 +7,7 @@ import importlib.util
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 import unittest
-from unittest.mock import Mock, call
+from unittest.mock import Mock, call, patch
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -247,6 +247,86 @@ class ReleaseRatioTests(unittest.TestCase):
         self.assertEqual(gui.release_ratio_from_registers(60, 60), 100)
         self.assertEqual(gui.release_ratio_from_registers(50, 2), 5)
         self.assertEqual(gui.release_ratio_from_registers(0, 0), 65)
+
+
+class ResetStateTests(unittest.TestCase):
+    """State guards for the standalone GUI's global Reset action."""
+
+    @staticmethod
+    def _var(value):
+        class FakeVar:
+            def __init__(self, initial):
+                self.value = initial
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        return FakeVar(value)
+
+    def _app(self):
+        gui = load_script(
+            "sensel_haptic_gui_reset_tests", ROOT / "tools/sensel_haptic_gui.py"
+        )
+        app = object.__new__(gui.SenselHapticApp)
+        app.loaded = True
+        app.device_path = "/dev/hidraw-test"
+        app.saving = False
+        app.previewing = False
+        app.syncing = False
+        app.saved_intensity = 71
+        app.saved_intensity_baseline = 71
+        app.haptic_feedback_var = self._var(False)
+        app.intensity_level_var = self._var(5)
+        app.intensity_value_var = self._var("5")
+        app.click_force_var = self._var(40)
+        app.click_force_value_var = self._var("40")
+        app.click_ratio_var = self._var(65)
+        app.click_ratio_value_var = self._var("65")
+        app.trackpoint_buttons_var = self._var(False)
+        app.trackpoint_force_var = self._var(40)
+        app.trackpoint_force_value_var = self._var("40")
+        app.trackpoint_ratio_var = self._var(65)
+        app.trackpoint_ratio_value_var = self._var("65")
+        app._set_controls_state = Mock()
+        app._update_dirty_state = Mock()
+        app._preview_batch = Mock()
+        return gui, app
+
+    def test_reset_is_ignored_while_saving(self) -> None:
+        _gui, app = self._app()
+        app.saving = True
+        app._reset_clicked()
+        self.assertEqual(app.click_force_var.get(), 40)
+        app._preview_batch.assert_not_called()
+
+    def test_reset_loads_all_default_values_as_one_batch(self) -> None:
+        _gui, app = self._app()
+        app._reset_clicked()
+        self.assertTrue(app.haptic_feedback_var.get())
+        self.assertEqual(app.intensity_level_var.get(), 10)
+        self.assertEqual(app.click_force_var.get(), 60)
+        self.assertEqual(app.trackpoint_force_var.get(), 120)
+        self.assertTrue(app.trackpoint_buttons_var.get())
+        app._preview_batch.assert_called_once()
+        operations, _status = app._preview_batch.call_args.args
+        self.assertEqual(len(operations), 4)
+
+    def test_cancel_restores_remembered_intensity(self) -> None:
+        gui, app = self._app()
+        app.saved_intensity = 100
+        app.saved_intensity_baseline = 71
+        app.intensity_applied = 71
+        app.click_force_applied = 40
+        app.click_ratio_applied = 65
+        app.trackpoint_force_applied = 40
+        app.trackpoint_ratio_applied = 65
+        app.buttons_applied = 0
+        with patch.object(gui, "save_haptic_preferences"):
+            app._cancel_clicked()
+        self.assertEqual(app.saved_intensity, 71)
 
 
 if __name__ == "__main__":
