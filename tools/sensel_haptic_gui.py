@@ -6,6 +6,12 @@ This is intentionally independent from GNOME Control Center.  It uses the
 same installed root-owned helper as the Settings integration, so both entry
 points share the Windows register protocol, persistence, readback checks and
 the same device state.
+
+Editing works as a staged draft: slider and switch changes are previewed to
+RAM only (immediate effect, no flash write), and the global Save button
+persists the changed registers one by one.  Each persisted save makes the
+firmment reload the user-setting block from flash and briefly stop answering
+the register pipe, so preview and commit are separate helper operations.
 """
 
 from __future__ import annotations
@@ -36,6 +42,11 @@ CLICK_FORCE_MIN = 1
 CLICK_FORCE_MAX = 255
 TRACKPOINT_FORCE_MIN = 1
 TRACKPOINT_FORCE_MAX = 255
+# Windows "Medium" preset used by the global Reset button (issue #1).
+RESET_INTENSITY = 71
+RESET_CLICK_FORCE = 82
+RESET_TRACKPOINT_FORCE = 38
+RESET_TRACKPOINT_BUTTONS = False
 
 
 def _translation_directories() -> list[Path]:
@@ -259,8 +270,8 @@ class SenselHapticApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(_("Sensel Haptic Touchpad"))
-        self.root.geometry("760x680")
-        self.root.minsize(620, 520)
+        self.root.geometry("760x720")
+        self.root.minsize(620, 560)
 
         self.worker = HelperQueue(root)
         self.devices: dict[str, str] = {}
@@ -268,9 +279,15 @@ class SenselHapticApp:
         self.loaded = False
         self.syncing = False
         self.read_in_flight = False
+        self.saving = False
         self.saved_intensity = load_saved_intensity()
+
+        # Draft model state: "saved_*" mirror the last committed device state,
+        # "applied_*" mirror what the preview currently put into RAM.
         self.click_force_applied: Optional[int] = None
         self.trackpoint_force_applied: Optional[int] = None
+        self.intensity_applied: Optional[int] = None
+        self.buttons_applied: Optional[int] = None
 
         self.device_var = tk.StringVar()
         self.haptic_feedback_var = tk.BooleanVar(value=False)
@@ -282,6 +299,7 @@ class SenselHapticApp:
         self.trackpoint_force_var = tk.IntVar(value=60)
         self.trackpoint_force_value_var = tk.StringVar(value="60")
         self.status_var = tk.StringVar(value=_("Looking for a Sensel Haptic Touchpad…"))
+        self.dirty_var = tk.BooleanVar(value=False)
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._close)
@@ -417,10 +435,6 @@ class SenselHapticApp:
         self.click_force_entry.grid(row=1, column=1, padx=(10, 6))
         self.click_force_entry.bind("<Return>", self._apply_click_force_entry)
         self.click_force_entry.bind("<FocusOut>", self._apply_click_force_entry)
-        self.click_force_apply_button = ttk.Button(
-            click_frame, text=_("Apply"), command=self._apply_click_force_entry
-        )
-        self.click_force_apply_button.grid(row=1, column=2)
 
         buttons_frame = ttk.LabelFrame(outer, text=_("TrackPoint Buttons"), padding=10)
         buttons_frame.pack(fill="x", pady=(0, 10))
@@ -480,12 +494,31 @@ class SenselHapticApp:
         self.trackpoint_force_entry.bind(
             "<FocusOut>", self._apply_trackpoint_force_entry
         )
-        self.trackpoint_force_apply_button = ttk.Button(
-            trackpoint_frame,
-            text=_("Apply"),
-            command=self._apply_trackpoint_force_entry,
+
+        # Global draft controls: previews are RAM-only; Save persists every
+        # changed register, Cancel restores the last saved state, Reset loads
+        # the Windows "Medium" preset as a new draft.
+        actions_frame = ttk.LabelFrame(outer, text=_("Pending Changes"), padding=10)
+        actions_frame.pack(fill="x", pady=(0, 10))
+        self.dirty_label = ttk.Label(
+            actions_frame,
+            text="● " + _("You have unsaved changes"),
+            foreground="#b35000",
         )
-        self.trackpoint_force_apply_button.grid(row=1, column=2)
+        self.dirty_label.grid(row=0, column=0, sticky="w")
+        actions_frame.columnconfigure(0, weight=1)
+        self.save_button = ttk.Button(
+            actions_frame, text=_("Save"), command=self._save_clicked, state="disabled"
+        )
+        self.save_button.grid(row=0, column=1, padx=(0, 8))
+        self.cancel_button = ttk.Button(
+            actions_frame, text=_("Cancel"), command=self._cancel_clicked, state="disabled"
+        )
+        self.cancel_button.grid(row=0, column=2, padx=(0, 8))
+        self.reset_button = ttk.Button(
+            actions_frame, text=_("Reset to Defaults"), command=self._reset_clicked
+        )
+        self.reset_button.grid(row=0, column=3)
 
         ttk.Separator(outer).pack(fill="x", pady=(4, 10))
         self.status_label = ttk.Label(
@@ -497,6 +530,7 @@ class SenselHapticApp:
         self.status_label.pack(anchor="w")
 
         self._set_controls_state(False)
+        self._update_dirty_state()
 
     def _on_mousewheel(self, event) -> None:
         if getattr(event, "num", None) == 4:
@@ -514,13 +548,11 @@ class SenselHapticApp:
         self.haptic_switch.configure(state=state)
         self.click_force_scale.configure(state=state)
         self.click_force_entry.configure(state=state)
-        self.click_force_apply_button.configure(state=state)
         self.trackpoint_buttons_switch.configure(state=state)
         trackpoint_state = (
             "normal" if available and self.trackpoint_buttons_var.get() else "disabled"
         )
         self.trackpoint_force_entry.configure(state=trackpoint_state)
-        self.trackpoint_force_apply_button.configure(state=trackpoint_state)
         self.intensity_scale.configure(
             state="normal" if available and self.haptic_feedback_var.get() else "disabled"
         )
@@ -529,6 +561,82 @@ class SenselHapticApp:
             if available and self.trackpoint_buttons_var.get()
             else "disabled"
         )
+        self._update_dirty_state()
+
+    # ------------------------------------------------------------------
+    # Draft state helpers
+    # ------------------------------------------------------------------
+
+    def _current_draft(self) -> dict[str, int]:
+        enabled = 1 if self.haptic_feedback_var.get() else 0
+        intensity = (
+            INTENSITY_LEVELS[self.intensity_level_var.get() - 1] if enabled else 0
+        )
+        return {
+            "intensity": intensity,
+            "click-force": self.click_force_var.get(),
+            "trackpoint-force": self.trackpoint_force_var.get(),
+            "buttons": 1 if self.trackpoint_buttons_var.get() else 0,
+        }
+
+    def _saved_draft(self) -> dict[str, int]:
+        return {
+            "intensity": self.intensity_applied if self.intensity_applied is not None else 0,
+            "click-force": self.click_force_applied
+            if self.click_force_applied is not None
+            else self.click_force_var.get(),
+            "trackpoint-force": self.trackpoint_force_applied
+            if self.trackpoint_force_applied is not None
+            else self.trackpoint_force_var.get(),
+            "buttons": self.buttons_applied
+            if self.buttons_applied is not None
+            else (1 if self.trackpoint_buttons_var.get() else 0),
+        }
+
+    def _is_dirty(self) -> bool:
+        if not self.loaded:
+            return False
+        return self._current_draft() != self._saved_draft()
+
+    def _update_dirty_state(self) -> None:
+        dirty = self._is_dirty()
+        self.dirty_var.set(dirty)
+        button_state = "normal" if dirty and not self.saving else "disabled"
+        self.save_button.configure(state=button_state)
+        self.cancel_button.configure(state=button_state)
+        if dirty:
+            self.dirty_label.configure(foreground="#b35000")
+        else:
+            self.dirty_label.configure(foreground="#555555")
+            if self.loaded and not self.saving:
+                self.dirty_label.configure(
+                    text="● " + _("All changes saved"),
+                    foreground="#2e7d32",
+                )
+                return
+        self.dirty_label.configure(text="● " + _("You have unsaved changes"))
+
+    def _preview(self, arguments: list[str], label: str) -> None:
+        """Preview a draft value to RAM without touching flash."""
+        if not self.loaded or not self.device_path or self.saving:
+            return
+
+        def finished(_output: str, error: Optional[str]) -> None:
+            if error:
+                self._set_status(
+                    _("Preview of {label} failed: {error}").format(label=label, error=error)
+                )
+                self._read_state()
+            else:
+                self._set_status(
+                    _("Previewing {label}. Press Save to keep it.").format(label=label)
+                )
+
+        self.worker.submit(arguments, finished)
+
+    # ------------------------------------------------------------------
+    # Device discovery / state loading
+    # ------------------------------------------------------------------
 
     def refresh_devices(self) -> None:
         found = find_sensel_devices()
@@ -594,7 +702,6 @@ class SenselHapticApp:
         intensity = state["haptic-intensity"]
         if intensity > 0:
             self.saved_intensity = intensity
-            save_haptic_preferences(intensity, True)
             haptic_enabled = True
             intensity_level = intensity_to_level(intensity)
         else:
@@ -602,60 +709,60 @@ class SenselHapticApp:
             haptic_enabled = False
             intensity_level = intensity_to_level(self.saved_intensity)
 
-        self.syncing = True
-        self.haptic_feedback_var.set(haptic_enabled)
-        self.intensity_level_var.set(intensity_level)
-        self.intensity_value_var.set(str(intensity_level))
         click_force = int(round(state["click-force"] / 2.0))
         click_force = max(CLICK_FORCE_MIN, min(CLICK_FORCE_MAX, click_force))
-        self.click_force_var.set(click_force)
-        self.click_force_value_var.set(str(click_force))
-        self.click_force_applied = click_force
-        self.trackpoint_buttons_var.set(bool(state["trackpoint-buttons"]))
         trackpoint_force = max(
             TRACKPOINT_FORCE_MIN,
             min(TRACKPOINT_FORCE_MAX, state["trackpoint-click-force"]),
         )
+        buttons = bool(state["trackpoint-buttons"])
+
+        self.syncing = True
+        self.haptic_feedback_var.set(haptic_enabled)
+        self.intensity_level_var.set(intensity_level)
+        self.intensity_value_var.set(str(intensity_level))
+        self.click_force_var.set(click_force)
+        self.click_force_value_var.set(str(click_force))
+        self.trackpoint_buttons_var.set(buttons)
         self.trackpoint_force_var.set(trackpoint_force)
         self.trackpoint_force_value_var.set(str(trackpoint_force))
-        self.trackpoint_force_applied = trackpoint_force
         self.syncing = False
+
+        # The RAM copy matches flash after a fresh read: the draft starts clean.
+        self.intensity_applied = intensity
+        self.click_force_applied = click_force
+        self.trackpoint_force_applied = trackpoint_force
+        self.buttons_applied = int(buttons)
+        if intensity > 0:
+            save_haptic_preferences(intensity, True)
+
         self.loaded = True
         self._set_controls_state(True)
+        self._update_dirty_state()
         self._set_status(
             _(
-                "Settings read from the device. Changes to sliders and switches "
-                "are saved to the device."
+                "Settings read from the device. Changes are previewed "
+                "immediately; press Save to write them permanently."
             )
         )
 
-    def _submit_write(self, arguments: list[str], label: str) -> None:
-        if not self.loaded or not self.device_path:
-            return
-        self._set_status(_("Applying {label}…").format(label=label))
-
-        def finished(_output: str, error: Optional[str]) -> None:
-            if error:
-                self._set_status(_("{label} failed: {error}").format(label=label, error=error))
-                messagebox.showerror(
-                    _("{label} failed").format(label=label), error, parent=self.root
-                )
-                self._read_state()
-            else:
-                self._set_status(_("{label} applied and saved.").format(label=label))
-
-        self.worker.submit(arguments, finished)
+    # ------------------------------------------------------------------
+    # Preview handlers (RAM only)
+    # ------------------------------------------------------------------
 
     def _intensity_changed(self, value: str) -> None:
         level = max(1, min(10, int(round(float(value)))))
         self.intensity_value_var.set(str(level))
         if self.syncing or not self.loaded or not self.haptic_feedback_var.get():
+            self._update_dirty_state()
             return
         raw = INTENSITY_LEVELS[level - 1]
         self.saved_intensity = raw
-        save_haptic_preferences(raw, True)
-        self._submit_write(
-            ["--set-intensity", self.device_path or "", str(raw)],
+        self._update_dirty_state()
+        if self.saving:
+            return
+        self._preview(
+            ["--preview-intensity", self.device_path or "", str(raw)],
             _("Haptics Intensity"),
         )
 
@@ -672,21 +779,23 @@ class SenselHapticApp:
             self.intensity_value_var.set(str(level))
             self.syncing = False
             self.saved_intensity = raw
-            save_haptic_preferences(raw, True)
             self._set_controls_state(True)
-            self._submit_write(
-                ["--set-intensity", self.device_path or "", str(raw)],
-                _("Haptic Feedback"),
-            )
+            self._update_dirty_state()
+            if not self.saving:
+                self._preview(
+                    ["--preview-intensity", self.device_path or "", str(raw)],
+                    _("Haptic Feedback"),
+                )
         else:
-            raw = INTENSITY_LEVELS[self.intensity_level_var.get() - 1]
-            self.saved_intensity = raw
-            save_haptic_preferences(raw, False)
+            self.saved_intensity = INTENSITY_LEVELS[self.intensity_level_var.get() - 1]
+            save_haptic_preferences(self.saved_intensity, False)
             self._set_controls_state(True)
-            self._submit_write(
-                ["--set-intensity", self.device_path or "", "0"],
-                _("Haptic Feedback"),
-            )
+            self._update_dirty_state()
+            if not self.saving:
+                self._preview(
+                    ["--preview-intensity", self.device_path or "", "0"],
+                    _("Haptic Feedback"),
+                )
 
     def _click_force_slider_changed(self, value: str) -> None:
         click_force = int(round(float(value)))
@@ -721,13 +830,13 @@ class SenselHapticApp:
         self.click_force_var.set(click_force)
         self.click_force_value_var.set(str(click_force))
         self.syncing = False
-        if self.click_force_applied == click_force:
+        self._update_dirty_state()
+        if self.click_force_applied == click_force or self.saving:
             return
-        self.click_force_applied = click_force
-        self._submit_write(
-            # The helper accepts main Click Force in physical Gf.  The GUI
-            # value is the raw register, so convert it back to Gf here.
-            ["--set-click-force", self.device_path or "", str(click_force * 2)],
+        # The helper accepts main Click Force in physical Gf.  The GUI
+        # value is the raw register, so convert it back to Gf here.
+        self._preview(
+            ["--preview-click-force", self.device_path or "", str(click_force * 2)],
             _("Click Force"),
         )
 
@@ -736,8 +845,11 @@ class SenselHapticApp:
             return
         self._set_controls_state(True)
         enabled = int(self.trackpoint_buttons_var.get())
-        self._submit_write(
-            ["--set-trackpoint-buttons", self.device_path or "", str(enabled)],
+        self._update_dirty_state()
+        if self.saving:
+            return
+        self._preview(
+            ["--preview-trackpoint-buttons", self.device_path or "", str(enabled)],
             _("TrackPoint Buttons"),
         )
 
@@ -780,16 +892,190 @@ class SenselHapticApp:
         self.trackpoint_force_var.set(trackpoint_force)
         self.trackpoint_force_value_var.set(str(trackpoint_force))
         self.syncing = False
-        if self.trackpoint_force_applied == trackpoint_force:
+        self._update_dirty_state()
+        if self.trackpoint_force_applied == trackpoint_force or self.saving:
             return
-        self.trackpoint_force_applied = trackpoint_force
-        self._submit_write(
+        self._preview(
             [
-                "--set-trackpoint-click-force",
+                "--preview-trackpoint-click-force",
                 self.device_path or "",
                 str(trackpoint_force),
             ],
             _("TrackPoint Click Force"),
+        )
+
+    # ------------------------------------------------------------------
+    # Global Save / Cancel / Reset
+    # ------------------------------------------------------------------
+
+    def _pending_operations(self) -> list[tuple[str, str, str]]:
+        """Changed settings as (label, helper flag, value) tuples."""
+        operations: list[tuple[str, str, str]] = []
+        draft = self._current_draft()
+        saved = self._saved_draft()
+        if draft["intensity"] != saved["intensity"]:
+            operations.append(
+                (
+                    _("Haptics Intensity"),
+                    "--commit-intensity",
+                    str(draft["intensity"]),
+                )
+            )
+        if draft["click-force"] != saved["click-force"]:
+            operations.append(
+                (
+                    _("Click Force"),
+                    "--commit-click-force",
+                    str(draft["click-force"] * 2),
+                )
+            )
+        if draft["trackpoint-force"] != saved["trackpoint-force"]:
+            operations.append(
+                (
+                    _("TrackPoint Click Force"),
+                    "--commit-trackpoint-click-force",
+                    str(draft["trackpoint-force"]),
+                )
+            )
+        if draft["buttons"] != saved["buttons"]:
+            operations.append(
+                (
+                    _("TrackPoint Buttons"),
+                    "--commit-trackpoint-buttons",
+                    str(draft["buttons"]),
+                )
+            )
+        return operations
+
+    def _save_clicked(self) -> None:
+        operations = self._pending_operations()
+        if not operations:
+            self._update_dirty_state()
+            return
+        self.saving = True
+        self._set_controls_state(True)
+        self.save_button.configure(state="disabled")
+        self.cancel_button.configure(state="disabled")
+        self._run_save_queue(operations, 0)
+
+    def _run_save_queue(self, operations: list[tuple[str, str, str]], index: int) -> None:
+        total = len(operations)
+        self._set_status(
+            _("Saving {current}/{total}: {label}…").format(
+                current=index + 1, total=total, label=operations[index][0]
+            )
+        )
+
+        def finished(_output: str, error: Optional[str]) -> None:
+            if error:
+                self.saving = False
+                self._set_status(
+                    _("Saving {label} failed: {error}").format(
+                        label=operations[index][0], error=error
+                    )
+                )
+                messagebox.showerror(
+                    _("Save failed"),
+                    error,
+                    parent=self.root,
+                )
+                # Re-read so applied_* reflect what actually reached the device.
+                self._read_state()
+                return
+            if index + 1 < total:
+                self._run_save_queue(operations, index + 1)
+            else:
+                self.saving = False
+                draft = self._current_draft()
+                self.intensity_applied = draft["intensity"]
+                self.click_force_applied = draft["click-force"]
+                self.trackpoint_force_applied = draft["trackpoint-force"]
+                self.buttons_applied = draft["buttons"]
+                if draft["intensity"] > 0:
+                    save_haptic_preferences(draft["intensity"], True)
+                self._set_controls_state(True)
+                self._update_dirty_state()
+                self._set_status(_("All changes saved to the device."))
+
+        self.worker.submit(
+            [operations[index][1], self.device_path or "", operations[index][2]],
+            finished,
+        )
+
+    def _cancel_clicked(self) -> None:
+        saved = self._saved_draft()
+        self.syncing = True
+        if saved["intensity"] > 0:
+            self.haptic_feedback_var.set(True)
+            self.intensity_level_var.set(intensity_to_level(saved["intensity"]))
+            self.intensity_value_var.set(str(intensity_to_level(saved["intensity"])))
+        else:
+            self.haptic_feedback_var.set(False)
+        self.click_force_var.set(saved["click-force"])
+        self.click_force_value_var.set(str(saved["click-force"]))
+        self.trackpoint_buttons_var.set(bool(saved["buttons"]))
+        self.trackpoint_force_var.set(saved["trackpoint-force"])
+        self.trackpoint_force_value_var.set(str(saved["trackpoint-force"]))
+        self.syncing = False
+        self._set_controls_state(True)
+        # Re-preview each saved value so device RAM matches flash again.
+        self._preview(
+            ["--preview-intensity", self.device_path or "", str(saved["intensity"])],
+            _("Haptics Intensity"),
+        )
+        self._preview(
+            ["--preview-click-force", self.device_path or "", str(saved["click-force"] * 2)],
+            _("Click Force"),
+        )
+        self._preview(
+            [
+                "--preview-trackpoint-click-force",
+                self.device_path or "",
+                str(saved["trackpoint-force"]),
+            ],
+            _("TrackPoint Click Force"),
+        )
+        self._preview(
+            ["--preview-trackpoint-buttons", self.device_path or "", str(saved["buttons"])],
+            _("TrackPoint Buttons"),
+        )
+        self._update_dirty_state()
+        self._set_status(_("Changes discarded; the device keeps its saved settings."))
+
+    def _reset_clicked(self) -> None:
+        self.syncing = True
+        self.haptic_feedback_var.set(True)
+        self.intensity_level_var.set(intensity_to_level(RESET_INTENSITY))
+        self.intensity_value_var.set(str(intensity_to_level(RESET_INTENSITY)))
+        self.saved_intensity = RESET_INTENSITY
+        self.click_force_var.set(RESET_CLICK_FORCE)
+        self.click_force_value_var.set(str(RESET_CLICK_FORCE))
+        self.trackpoint_buttons_var.set(RESET_TRACKPOINT_BUTTONS)
+        self.trackpoint_force_var.set(RESET_TRACKPOINT_FORCE)
+        self.trackpoint_force_value_var.set(str(RESET_TRACKPOINT_FORCE))
+        self.syncing = False
+        self._set_controls_state(True)
+        # Preview the preset like any other draft change.
+        if not self.saving:
+            self._preview(
+                ["--preview-intensity", self.device_path or "", str(RESET_INTENSITY)],
+                _("Haptics Intensity"),
+            )
+            self._preview(
+                ["--preview-click-force", self.device_path or "", str(RESET_CLICK_FORCE * 2)],
+                _("Click Force"),
+            )
+            self._preview(
+                ["--preview-trackpoint-click-force", self.device_path or "", str(RESET_TRACKPOINT_FORCE)],
+                _("TrackPoint Click Force"),
+            )
+            self._preview(
+                ["--preview-trackpoint-buttons", self.device_path or "", str(int(RESET_TRACKPOINT_BUTTONS))],
+                _("TrackPoint Buttons"),
+            )
+        self._update_dirty_state()
+        self._set_status(
+            _("Default preset loaded as a draft. Adjust it and press Save to keep it.")
         )
 
     def _close(self) -> None:

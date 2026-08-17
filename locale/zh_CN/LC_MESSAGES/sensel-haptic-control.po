@@ -141,6 +141,70 @@ msgid "{label} applied and saved."
 msgstr "{label}已应用并保存。"
 
 #: tools/sensel_haptic_gui.py
+msgid "Pending Changes"
+msgstr "待保存的更改"
+
+#: tools/sensel_haptic_gui.py
+msgid "You have unsaved changes"
+msgstr "有未保存的更改"
+
+#: tools/sensel_haptic_gui.py
+msgid "All changes saved"
+msgstr "所有更改已保存"
+
+#: tools/sensel_haptic_gui.py
+msgid "Save"
+msgstr "保存"
+
+#: tools/sensel_haptic_gui.py
+msgid "Cancel"
+msgstr "取消"
+
+#: tools/sensel_haptic_gui.py
+msgid "Reset to Defaults"
+msgstr "恢复默认"
+
+#, python-brace-format
+#: tools/sensel_haptic_gui.py
+msgid "Preview of {label} failed: {error}"
+msgstr "预览{label}失败：{error}"
+
+#, python-brace-format
+#: tools/sensel_haptic_gui.py
+msgid "Previewing {label}. Press Save to keep it."
+msgstr "正在预览{label}。点“保存”才会写入。"
+
+#: tools/sensel_haptic_gui.py
+msgid "Settings read from the device. Changes are previewed immediately; press Save to write them permanently."
+msgstr "已从设备读取设置。改动会即时预览，点“保存”才会永久写入。"
+
+#, python-brace-format
+#: tools/sensel_haptic_gui.py
+msgid "Saving {current}/{total}: {label}…"
+msgstr "正在保存 {current}/{total}：{label}…"
+
+#, python-brace-format
+#: tools/sensel_haptic_gui.py
+msgid "Saving {label} failed: {error}"
+msgstr "保存{label}失败：{error}"
+
+#: tools/sensel_haptic_gui.py
+msgid "Save failed"
+msgstr "保存失败"
+
+#: tools/sensel_haptic_gui.py
+msgid "All changes saved to the device."
+msgstr "所有更改已保存到设备。"
+
+#: tools/sensel_haptic_gui.py
+msgid "Changes discarded; the device keeps its saved settings."
+msgstr "已放弃更改；设备保留已保存的设置。"
+
+#: tools/sensel_haptic_gui.py
+msgid "Default preset loaded as a draft. Adjust it and press Save to keep it."
+msgstr "默认预设已载入为草稿。可继续调整，点“保存”才会写入。"
+
+#: tools/sensel_haptic_gui.py
 msgid "Invalid Click Force"
 msgstr "无效的点击力度"
 

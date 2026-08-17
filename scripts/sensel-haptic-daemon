@@ -249,6 +249,42 @@ class SenselPipe:
             raise RuntimeError("main click-up force readback mismatch")
         return down, up
 
+    def preview_main_click_force(self, gf):
+        """Write RAM only: takes effect immediately, no flash, no readback."""
+        if (
+            gf < CLICK_FORCE_MIN
+            or gf > CLICK_FORCE_MAX
+            or gf % 2 != 0
+        ):
+            raise ValueError("click force must be an even value from 2 to 510 Gf")
+        down = gf // 2
+        up = int(round(down * RELEASE_FORCE_RATIO))
+        self.write_register(CLICK_DOWN_REGISTER, bytes((down,)), persist=False)
+        self.write_register(CLICK_UP_REGISTER, bytes((up,)), persist=False)
+        return down, up
+
+    def commit_main_click_force(self, gf):
+        """Persist each register right after writing it.
+
+        Saving a UserSetting makes the firmware reload the whole user-setting
+        block from flash into RAM, discarding other unsaved RAM changes. So a
+        batch save must interleave per-register write+save instead of writing
+        everything first and saving afterwards. Readbacks are skipped: each
+        save opens a ~2.6 s flash-busy window and the register value has
+        already been verified during preview.
+        """
+        if (
+            gf < CLICK_FORCE_MIN
+            or gf > CLICK_FORCE_MAX
+            or gf % 2 != 0
+        ):
+            raise ValueError("click force must be an even value from 2 to 510 Gf")
+        down = gf // 2
+        up = int(round(down * RELEASE_FORCE_RATIO))
+        self.write_register(CLICK_DOWN_REGISTER, bytes((down,)), persist=True)
+        self.write_register(CLICK_UP_REGISTER, bytes((up,)), persist=True)
+        return down, up
+
     def read_haptic_intensity(self):
         return self.read_register(HAPTIC_INTENSITY_REGISTER, 1)[0]
 
@@ -262,6 +298,17 @@ class SenselPipe:
             HAPTIC_INTENSITY_REGISTER,
             bytes((intensity,)),
             persist=True,
+        )
+        return intensity
+
+    def preview_haptic_intensity(self, intensity):
+        """Write RAM only: takes effect immediately, no flash write."""
+        if not 0 <= intensity <= 100:
+            raise ValueError("haptic intensity must be between 0 and 100")
+        self.write_register(
+            HAPTIC_INTENSITY_REGISTER,
+            bytes((intensity,)),
+            persist=False,
         )
         return intensity
 
@@ -318,6 +365,68 @@ class SenselPipe:
                 )
         return down, up
 
+    def preview_trackpoint_click_force(self, gf):
+        """Write RAM only: takes effect immediately, no flash, no readback."""
+        if gf < THREE_HB_FORCE_MIN or gf > THREE_HB_FORCE_MAX:
+            raise ValueError(
+                "TrackPoint click force must be a value from 1 to 255 "
+                "(Windows TrackPoint register units)"
+            )
+        down = gf
+        up = int(round(down * RELEASE_FORCE_RATIO))
+        for value, addresses in (
+            (
+                down,
+                (
+                    THREE_HB_LEFT_DOWN_REGISTER,
+                    THREE_HB_RIGHT_DOWN_REGISTER,
+                    THREE_HB_MIDDLE_DOWN_REGISTER,
+                ),
+            ),
+            (
+                up,
+                (
+                    THREE_HB_LEFT_UP_REGISTER,
+                    THREE_HB_RIGHT_UP_REGISTER,
+                    THREE_HB_MIDDLE_UP_REGISTER,
+                ),
+            ),
+        ):
+            for address in addresses:
+                self.write_register(address, bytes((value,)), persist=False)
+        return down, up
+
+    def commit_trackpoint_click_force(self, gf):
+        """Persist each register right after writing it (see commit_main_click_force)."""
+        if gf < THREE_HB_FORCE_MIN or gf > THREE_HB_FORCE_MAX:
+            raise ValueError(
+                "TrackPoint click force must be a value from 1 to 255 "
+                "(Windows TrackPoint register units)"
+            )
+        down = gf
+        up = int(round(down * RELEASE_FORCE_RATIO))
+        for value, addresses in (
+            (
+                down,
+                (
+                    THREE_HB_LEFT_DOWN_REGISTER,
+                    THREE_HB_RIGHT_DOWN_REGISTER,
+                    THREE_HB_MIDDLE_DOWN_REGISTER,
+                ),
+            ),
+            (
+                up,
+                (
+                    THREE_HB_LEFT_UP_REGISTER,
+                    THREE_HB_RIGHT_UP_REGISTER,
+                    THREE_HB_MIDDLE_UP_REGISTER,
+                ),
+            ),
+        ):
+            for address in addresses:
+                self.write_register(address, bytes((value,)), persist=True)
+        return down, up
+
     def read_trackpoint_buttons(self):
         return self.read_register(PTP_BUTTONS_CONFIG_REGISTER, 1)[0]
 
@@ -329,6 +438,17 @@ class SenselPipe:
             PTP_BUTTONS_CONFIG_REGISTER,
             bytes((enabled,)),
             persist=True,
+        )
+        return enabled
+
+    def preview_trackpoint_buttons(self, enabled):
+        """Write RAM only: takes effect immediately, no flash write."""
+        if enabled not in (0, 1):
+            raise ValueError("TrackPoint button mode must be 0 or 1")
+        self.write_register(
+            PTP_BUTTONS_CONFIG_REGISTER,
+            bytes((enabled,)),
+            persist=False,
         )
         return enabled
 
@@ -379,6 +499,110 @@ def main():
         except ValueError:
             print("haptic intensity must be an integer from 0 to 100", file=sys.stderr)
             return 2
+    elif len(sys.argv) == 4 and sys.argv[1] == "--preview-intensity":
+        mode = "preview-intensity"
+        device_path = sys.argv[2]
+        try:
+            intensity = int(sys.argv[3], 10)
+        except ValueError:
+            print("haptic intensity must be an integer from 0 to 100", file=sys.stderr)
+            return 2
+        if not 0 <= intensity <= 100:
+            print("haptic intensity must be an integer from 0 to 100", file=sys.stderr)
+            return 2
+    elif len(sys.argv) == 4 and sys.argv[1] == "--commit-intensity":
+        mode = "commit-intensity"
+        device_path = sys.argv[2]
+        try:
+            intensity = int(sys.argv[3], 10)
+        except ValueError:
+            print("haptic intensity must be an integer from 0 to 100", file=sys.stderr)
+            return 2
+        if not 0 <= intensity <= 100:
+            print("haptic intensity must be an integer from 0 to 100", file=sys.stderr)
+            return 2
+    elif len(sys.argv) == 4 and sys.argv[1] == "--preview-click-force":
+        mode = "preview-click-force"
+        device_path = sys.argv[2]
+        try:
+            click_force = int(sys.argv[3], 10)
+        except ValueError:
+            print("click force must be an even value from 2 to 510 Gf", file=sys.stderr)
+            return 2
+        if click_force < CLICK_FORCE_MIN or click_force > CLICK_FORCE_MAX or click_force % 2:
+            print("click force must be an even value from 2 to 510 Gf", file=sys.stderr)
+            return 2
+    elif len(sys.argv) == 4 and sys.argv[1] == "--commit-click-force":
+        mode = "commit-click-force"
+        device_path = sys.argv[2]
+        try:
+            click_force = int(sys.argv[3], 10)
+        except ValueError:
+            print("click force must be an even value from 2 to 510 Gf", file=sys.stderr)
+            return 2
+        if click_force < CLICK_FORCE_MIN or click_force > CLICK_FORCE_MAX or click_force % 2:
+            print("click force must be an even value from 2 to 510 Gf", file=sys.stderr)
+            return 2
+    elif len(sys.argv) == 4 and sys.argv[1] == "--preview-trackpoint-force":
+        mode = "preview-trackpoint-force"
+        device_path = sys.argv[2]
+        try:
+            trackpoint_force = int(sys.argv[3], 10)
+        except ValueError:
+            print(
+                "TrackPoint click force must be a value from 1 to 255 "
+                "(Windows TrackPoint register units)",
+                file=sys.stderr,
+            )
+            return 2
+        if trackpoint_force < THREE_HB_FORCE_MIN or trackpoint_force > THREE_HB_FORCE_MAX:
+            print(
+                "TrackPoint click force must be a value from 1 to 255 "
+                "(Windows TrackPoint register units)",
+                file=sys.stderr,
+            )
+            return 2
+    elif len(sys.argv) == 4 and sys.argv[1] == "--commit-trackpoint-force":
+        mode = "commit-trackpoint-force"
+        device_path = sys.argv[2]
+        try:
+            trackpoint_force = int(sys.argv[3], 10)
+        except ValueError:
+            print(
+                "TrackPoint click force must be a value from 1 to 255 "
+                "(Windows TrackPoint register units)",
+                file=sys.stderr,
+            )
+            return 2
+        if trackpoint_force < THREE_HB_FORCE_MIN or trackpoint_force > THREE_HB_FORCE_MAX:
+            print(
+                "TrackPoint click force must be a value from 1 to 255 "
+                "(Windows TrackPoint register units)",
+                file=sys.stderr,
+            )
+            return 2
+    elif len(sys.argv) == 4 and sys.argv[1] == "--preview-trackpoint-buttons":
+        mode = "preview-trackpoint-buttons"
+        device_path = sys.argv[2]
+        try:
+            trackpoint_buttons = int(sys.argv[3], 10)
+        except ValueError:
+            print("TrackPoint button mode must be 0 or 1", file=sys.stderr)
+            return 2
+        if trackpoint_buttons not in (0, 1):
+            print("TrackPoint button mode must be 0 or 1", file=sys.stderr)
+            return 2
+    elif len(sys.argv) == 4 and sys.argv[1] == "--commit-trackpoint-buttons":
+        mode = "commit-trackpoint-buttons"
+        device_path = sys.argv[2]
+        try:
+            trackpoint_buttons = int(sys.argv[3], 10)
+        except ValueError:
+            print("TrackPoint button mode must be 0 or 1", file=sys.stderr)
+            return 2
+        if trackpoint_buttons not in (0, 1):
+            print("TrackPoint button mode must be 0 or 1", file=sys.stderr)
+            return 2
     elif len(sys.argv) == 4 and sys.argv[1] == "--write-click-force":
         mode = "write-click-force"
         device_path = sys.argv[2]
@@ -423,6 +647,8 @@ def main():
         print("   or: sensel-haptic-daemon --read-state /dev/hidrawN", file=sys.stderr)
         print("   or: sensel-haptic-daemon --read-intensity /dev/hidrawN", file=sys.stderr)
         print("   or: sensel-haptic-daemon --write-intensity /dev/hidrawN 0..100", file=sys.stderr)
+        print("   or: sensel-haptic-daemon --preview-intensity /dev/hidrawN 0..100", file=sys.stderr)
+        print("   or: sensel-haptic-daemon --commit-intensity /dev/hidrawN 0..100", file=sys.stderr)
         print(
             "   or: sensel-haptic-daemon --read-click-force /dev/hidrawN",
             file=sys.stderr,
@@ -431,10 +657,22 @@ def main():
             "   or: sensel-haptic-daemon --write-click-force /dev/hidrawN 2..510 (even Gf)",
             file=sys.stderr,
         )
+        print(
+            "   or: sensel-haptic-daemon --preview-click-force /dev/hidrawN 2..510 (even Gf)",
+            file=sys.stderr,
+        )
+        print(
+            "   or: sensel-haptic-daemon --commit-click-force /dev/hidrawN 2..510 (even Gf)",
+            file=sys.stderr,
+        )
         print("   or: sensel-haptic-daemon --read-trackpoint-force /dev/hidrawN", file=sys.stderr)
         print("   or: sensel-haptic-daemon --write-trackpoint-force /dev/hidrawN 1..255", file=sys.stderr)
+        print("   or: sensel-haptic-daemon --preview-trackpoint-force /dev/hidrawN 1..255", file=sys.stderr)
+        print("   or: sensel-haptic-daemon --commit-trackpoint-force /dev/hidrawN 1..255", file=sys.stderr)
         print("   or: sensel-haptic-daemon --read-trackpoint-buttons /dev/hidrawN", file=sys.stderr)
         print("   or: sensel-haptic-daemon --write-trackpoint-buttons /dev/hidrawN 0|1", file=sys.stderr)
+        print("   or: sensel-haptic-daemon --preview-trackpoint-buttons /dev/hidrawN 0|1", file=sys.stderr)
+        print("   or: sensel-haptic-daemon --commit-trackpoint-buttons /dev/hidrawN 0|1", file=sys.stderr)
         return 2
 
     try:
@@ -455,6 +693,16 @@ def main():
                 print(pipe.set_haptic_intensity(intensity), flush=True)
             return 0
 
+        if mode == "preview-intensity":
+            with SenselPipe(device_path) as pipe:
+                print(pipe.preview_haptic_intensity(intensity), flush=True)
+            return 0
+
+        if mode == "commit-intensity":
+            with SenselPipe(device_path) as pipe:
+                print(pipe.set_haptic_intensity(intensity), flush=True)
+            return 0
+
         if mode == "read-click-force":
             with SenselPipe(device_path) as pipe:
                 print(pipe.read_main_click_force(), flush=True)
@@ -463,6 +711,18 @@ def main():
         if mode == "write-click-force":
             with SenselPipe(device_path) as pipe:
                 down, up = pipe.set_main_click_force(click_force)
+                print(f"click-down={down}, click-up={up}", flush=True)
+            return 0
+
+        if mode == "preview-click-force":
+            with SenselPipe(device_path) as pipe:
+                down, up = pipe.preview_main_click_force(click_force)
+                print(f"click-down={down}, click-up={up}", flush=True)
+            return 0
+
+        if mode == "commit-click-force":
+            with SenselPipe(device_path) as pipe:
+                down, up = pipe.commit_main_click_force(click_force)
                 print(f"click-down={down}, click-up={up}", flush=True)
             return 0
 
@@ -477,12 +737,34 @@ def main():
                 print(f"trackpoint-click-down={down}, trackpoint-click-up={up}", flush=True)
             return 0
 
+        if mode == "preview-trackpoint-force":
+            with SenselPipe(device_path) as pipe:
+                down, up = pipe.preview_trackpoint_click_force(trackpoint_force)
+                print(f"trackpoint-click-down={down}, trackpoint-click-up={up}", flush=True)
+            return 0
+
+        if mode == "commit-trackpoint-force":
+            with SenselPipe(device_path) as pipe:
+                down, up = pipe.commit_trackpoint_click_force(trackpoint_force)
+                print(f"trackpoint-click-down={down}, trackpoint-click-up={up}", flush=True)
+            return 0
+
         if mode == "read-trackpoint-buttons":
             with SenselPipe(device_path) as pipe:
                 print(int(bool(pipe.read_trackpoint_buttons())), flush=True)
             return 0
 
         if mode == "write-trackpoint-buttons":
+            with SenselPipe(device_path) as pipe:
+                print(pipe.set_trackpoint_buttons(trackpoint_buttons), flush=True)
+            return 0
+
+        if mode == "preview-trackpoint-buttons":
+            with SenselPipe(device_path) as pipe:
+                print(pipe.preview_trackpoint_buttons(trackpoint_buttons), flush=True)
+            return 0
+
+        if mode == "commit-trackpoint-buttons":
             with SenselPipe(device_path) as pipe:
                 print(pipe.set_trackpoint_buttons(trackpoint_buttons), flush=True)
             return 0

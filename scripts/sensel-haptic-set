@@ -66,6 +66,46 @@ elif [ "$#" -eq 3 ] && [ "$1" = "--set-intensity" ]; then
     device=$2
     usage=
     value=$3
+elif [ "$#" -eq 3 ] && [ "$1" = "--preview-intensity" ]; then
+    mode=intensity-preview
+    device=$2
+    usage=
+    value=$3
+elif [ "$#" -eq 3 ] && [ "$1" = "--commit-intensity" ]; then
+    mode=intensity-commit
+    device=$2
+    usage=
+    value=$3
+elif [ "$#" -eq 3 ] && [ "$1" = "--preview-click-force" ]; then
+    mode=click-preview
+    device=$2
+    usage=
+    value=$3
+elif [ "$#" -eq 3 ] && [ "$1" = "--commit-click-force" ]; then
+    mode=click-commit
+    device=$2
+    usage=
+    value=$3
+elif [ "$#" -eq 3 ] && [ "$1" = "--preview-trackpoint-click-force" ]; then
+    mode=trackpoint-preview
+    device=$2
+    usage=
+    value=$3
+elif [ "$#" -eq 3 ] && [ "$1" = "--commit-trackpoint-click-force" ]; then
+    mode=trackpoint-commit
+    device=$2
+    usage=
+    value=$3
+elif [ "$#" -eq 3 ] && [ "$1" = "--preview-trackpoint-buttons" ]; then
+    mode=buttons-preview
+    device=$2
+    usage=
+    value=$3
+elif [ "$#" -eq 3 ] && [ "$1" = "--commit-trackpoint-buttons" ]; then
+    mode=buttons-commit
+    device=$2
+    usage=
+    value=$3
 elif [ "$#" -eq 3 ]; then
     device=$1
     usage=$2
@@ -83,6 +123,14 @@ else
     echo "   or: sensel-haptic-set --get-state /dev/hidrawN" >&2
     echo "   or: sensel-haptic-set --get-intensity /dev/hidrawN" >&2
     echo "   or: sensel-haptic-set --set-intensity /dev/hidrawN 0..100" >&2
+    echo "   or: sensel-haptic-set --preview-intensity /dev/hidrawN 0..100" >&2
+    echo "   or: sensel-haptic-set --commit-intensity /dev/hidrawN 0..100" >&2
+    echo "   or: sensel-haptic-set --preview-click-force /dev/hidrawN 2..510" >&2
+    echo "   or: sensel-haptic-set --commit-click-force /dev/hidrawN 2..510" >&2
+    echo "   or: sensel-haptic-set --preview-trackpoint-click-force /dev/hidrawN 1..255" >&2
+    echo "   or: sensel-haptic-set --commit-trackpoint-click-force /dev/hidrawN 1..255" >&2
+    echo "   or: sensel-haptic-set --preview-trackpoint-buttons /dev/hidrawN 0|1" >&2
+    echo "   or: sensel-haptic-set --commit-trackpoint-buttons /dev/hidrawN 0|1" >&2
     exit 2
 fi
 
@@ -178,6 +226,68 @@ if [ "$mode" = intensity-set ]; then
     fi
     [ -x "$daemon" ] || { echo "Sensel HID daemon was not installed" >&2; exit 1; }
     exec "$daemon" --write-intensity "$device" "$value"
+fi
+
+# Draft-preview and commit operations for the GUI's staged editing model.
+# Preview writes RAM only (immediate effect, no flash); commit persists the
+# register while its RAM value is still current (write-then-save per register,
+# because each save reloads the whole user-setting block from flash).
+
+if [ "$mode" = intensity-preview ] || [ "$mode" = intensity-commit ]; then
+    case "$value" in
+        ''|*[!0-9]*) echo "intensity must be an integer from 0 to 100" >&2; exit 2 ;;
+    esac
+    if [ "$value" -gt 100 ]; then
+        echo "intensity must be an integer from 0 to 100" >&2
+        exit 2
+    fi
+    [ -x "$daemon" ] || { echo "Sensel HID daemon was not installed" >&2; exit 1; }
+    if [ "$mode" = intensity-preview ]; then
+        exec "$daemon" --preview-intensity "$device" "$value"
+    else
+        exec "$daemon" --commit-intensity "$device" "$value"
+    fi
+fi
+
+if [ "$mode" = click-preview ] || [ "$mode" = click-commit ]; then
+    case "$value" in ''|*[!0-9]*) echo "click force must be an even value from 2 to 510 Gf" >&2; exit 2 ;; esac
+    if [ "$value" -lt 2 ] || [ "$value" -gt 510 ] || [ $((value % 2)) -ne 0 ]; then
+        echo "click force must be an even value from 2 to 510 Gf" >&2
+        exit 2
+    fi
+    [ -x "$daemon" ] || { echo "Sensel HID daemon was not installed" >&2; exit 1; }
+    if [ "$mode" = click-preview ]; then
+        exec "$daemon" --preview-click-force "$device" "$value"
+    else
+        exec "$daemon" --commit-click-force "$device" "$value"
+    fi
+fi
+
+if [ "$mode" = trackpoint-preview ] || [ "$mode" = trackpoint-commit ]; then
+    case "$value" in ''|*[!0-9]*) echo "TrackPoint click force must be a value from 1 to 255" >&2; exit 2 ;; esac
+    if [ "$value" -lt 1 ] || [ "$value" -gt 255 ]; then
+        echo "TrackPoint click force must be a value from 1 to 255" >&2
+        exit 2
+    fi
+    [ -x "$daemon" ] || { echo "Sensel HID daemon was not installed" >&2; exit 1; }
+    if [ "$mode" = trackpoint-preview ]; then
+        exec "$daemon" --preview-trackpoint-force "$device" "$value"
+    else
+        exec "$daemon" --commit-trackpoint-force "$device" "$value"
+    fi
+fi
+
+if [ "$mode" = buttons-preview ] || [ "$mode" = buttons-commit ]; then
+    case "$value" in
+        0|1) ;;
+        *) echo "TrackPoint button mode must be 0 or 1" >&2; exit 2 ;;
+    esac
+    [ -x "$daemon" ] || { echo "Sensel HID daemon was not installed" >&2; exit 1; }
+    if [ "$mode" = buttons-preview ]; then
+        exec "$daemon" --preview-trackpoint-buttons "$device" "$value"
+    else
+        exec "$daemon" --commit-trackpoint-buttons "$device" "$value"
+    fi
 fi
 
 case "$usage" in

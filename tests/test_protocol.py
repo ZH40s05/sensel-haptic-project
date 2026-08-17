@@ -123,5 +123,71 @@ class RegisterOperationTests(unittest.TestCase):
         self.pipe.write_register.assert_not_called()
 
 
+class DraftOperationTests(unittest.TestCase):
+    """Preview/commit flows backing the GUI draft model (issue #1)."""
+
+    def setUp(self) -> None:
+        self.pipe = object.__new__(daemon.SenselPipe)
+        self.pipe.write_register = Mock()
+        self.pipe.read_register = Mock()
+
+    def test_previews_write_ram_only(self) -> None:
+        self.assertEqual(self.pipe.preview_haptic_intensity(77), 77)
+        self.pipe.write_register.assert_called_once_with(
+            daemon.HAPTIC_INTENSITY_REGISTER, bytes((77,)), persist=False
+        )
+        self.pipe.write_register.reset_mock()
+
+        self.assertEqual(self.pipe.preview_trackpoint_buttons(1), 1)
+        self.pipe.write_register.assert_called_once_with(
+            daemon.PTP_BUTTONS_CONFIG_REGISTER, bytes((1,)), persist=False
+        )
+        self.pipe.write_register.reset_mock()
+
+        self.assertEqual(self.pipe.preview_main_click_force(164), (82, 53))
+        self.assertEqual(
+            self.pipe.write_register.call_args_list,
+            [
+                call(daemon.CLICK_DOWN_REGISTER, bytes((82,)), persist=False),
+                call(daemon.CLICK_UP_REGISTER, bytes((53,)), persist=False),
+            ],
+        )
+        self.pipe.write_register.reset_mock()
+
+        self.assertEqual(self.pipe.preview_trackpoint_click_force(38), (38, 25))
+        for invoked in self.pipe.write_register.call_args_list:
+            self.assertIs(invoked.kwargs["persist"], False)
+        self.assertEqual(len(self.pipe.write_register.call_args_list), 6)
+
+    def test_previews_do_not_read_back(self) -> None:
+        self.pipe.preview_haptic_intensity(50)
+        self.pipe.preview_trackpoint_buttons(0)
+        self.pipe.preview_main_click_force(120)
+        self.pipe.preview_trackpoint_click_force(60)
+        self.pipe.read_register.assert_not_called()
+
+    def test_commits_persist_each_register_immediately(self) -> None:
+        # Each save reloads the user-setting block from flash, wiping other
+        # unsaved RAM values, so a commit must interleave write+save.
+        self.assertEqual(self.pipe.commit_main_click_force(190), (95, 62))
+        self.assertEqual(
+            self.pipe.write_register.call_args_list,
+            [
+                call(daemon.CLICK_DOWN_REGISTER, bytes((95,)), persist=True),
+                call(daemon.CLICK_UP_REGISTER, bytes((62,)), persist=True),
+            ],
+        )
+        self.pipe.read_register.assert_not_called()
+        self.pipe.write_register.reset_mock()
+
+        self.assertEqual(self.pipe.commit_trackpoint_click_force(60), (60, 39))
+        calls = self.pipe.write_register.call_args_list
+        self.assertEqual(len(calls), 6)
+        self.assertEqual([c.args[1] for c in calls[:3]], [bytes((60,))] * 3)
+        self.assertEqual([c.args[1] for c in calls[3:]], [bytes((39,))] * 3)
+        self.assertTrue(all(c.kwargs["persist"] for c in calls))
+        self.pipe.read_register.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
