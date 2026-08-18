@@ -185,7 +185,8 @@ kbd { background:#eef1f4; border:1px solid var(--line); border-radius:4px; paddi
 "use strict";
 /* ================= protocol constants (mirror the daemon) ================= */
 const PIPE_REPORT_ID = 0x09;       // WebHID payload excludes the report ID
-const PIPE_PAYLOAD_MAX = 19;       // 20-byte report minus len byte
+const PIPE_REPORT_SIZE = 20;       // fixed data size; report ID is separate
+const PIPE_PAYLOAD_MAX = PIPE_REPORT_SIZE - 1;
 const READ_ACK = 0x01, WRITE_ACK = 0x05;
 const SAVE_REGISTER = 0x0230, USER_SETTING_ATTRIBUTE = 0x4000;
 const REG = {
@@ -291,7 +292,7 @@ class SenselPipe {
     this.handler = (ev) => {
       if (ev.reportId !== PIPE_REPORT_ID) return;
       const d = ev.data;
-      if (d.byteLength < 2) return;
+      if (d.byteLength < PIPE_REPORT_SIZE) return;
       const count = d.getUint8(0);
       if (count === 0 || count > PIPE_PAYLOAD_MAX || d.byteLength < 1 + count) return;
       const chunk = [];
@@ -329,7 +330,7 @@ class SenselPipe {
   async _sendPayload(payload) {
     for (let start = 0; start < payload.length; start += PIPE_PAYLOAD_MAX) {
       const chunk = payload.slice(start, start + PIPE_PAYLOAD_MAX);
-      const report = new Uint8Array(1 + chunk.length);
+      const report = new Uint8Array(PIPE_REPORT_SIZE);
       report[0] = chunk.length;
       report.set(chunk, 1);
       await this.device.sendReport(PIPE_REPORT_ID, report);
@@ -397,7 +398,6 @@ const rawToLevel = raw => raw <= 0 ? 5 :
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function readState(pipe) {
-  const inten = (await pipe.readRegister(REG.INTENSITY, 1))[0];
   const cd = (await pipe.readRegister(REG.CLICK_DOWN, 1))[0];
   const cu = (await pipe.readRegister(REG.CLICK_UP, 1))[0];
   const readValues = async addresses => {
@@ -412,6 +412,7 @@ async function readState(pipe) {
     throw new Error("TrackPoint force registers do not match");
   const td = tpDown[0];
   const tu = tpUp[0];
+  const inten = (await pipe.readRegister(REG.INTENSITY, 1))[0];
   const btn = (await pipe.readRegister(REG.TP_BUTTONS, 1))[0];
   return {
     intensity: inten,

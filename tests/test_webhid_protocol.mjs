@@ -41,6 +41,7 @@ class FakeSensel {
     ]);
     this.listeners = [];
     this.sent = [];
+    this.reads = [];
   }
 
   addEventListener(_type, fn) { this.listeners.push(fn); }
@@ -48,6 +49,8 @@ class FakeSensel {
 
   async sendReport(id, data) {
     if (id !== 9) throw new Error(`unexpected report id ${id}`);
+    if (data.byteLength !== 20)
+      throw new Error(`unexpected report data size: ${data.byteLength}`);
     this.sent.push(data);
     const payload = Array.from(data.slice(1, 1 + data[0]));
     const [first, addrLow, size] = payload;
@@ -61,6 +64,7 @@ class FakeSensel {
       for (const fn of this.listeners) fn({ reportId: 9, data: view });
     };
     if (first & 0x80) {
+      this.reads.push(address);
       const body = Array.from({ length: size }, (_, i) => this.regs.get(address + i) ?? 0);
       const sum = body.reduce((a, b) => a + b, 0) & 0xff;
       respond([0x01, 0x00, size & 0xff, size >> 8, ...body, sum]);
@@ -125,6 +129,8 @@ try {
   // Framed register read.
   const intensity = await pipe.readRegister(E.REG.INTENSITY, 1);
   check(intensity[0] === 100, "framed register read returns value");
+  check(fake.sent[0].byteLength === 20,
+    "output reports use the fixed 20-byte data size");
 
   // RAM-only write (preview).
   await pipe.writeRegister(E.REG.INTENSITY, [55], false);
@@ -150,9 +156,19 @@ try {
   }
 
   // Full state read recovers the release ratio from the register pair.
+  fake.reads = [];
   const state = await E.readState(pipe);
   check(state.intensity === 55 && state.clickForce === 60,
     "readState returns all values");
+  check(
+    JSON.stringify(fake.reads) === JSON.stringify([
+      E.REG.CLICK_DOWN, E.REG.CLICK_UP,
+      E.REG.TP_L_DOWN, E.REG.TP_R_DOWN, E.REG.TP_M_DOWN,
+      E.REG.TP_L_UP, E.REG.TP_R_UP, E.REG.TP_M_UP,
+      E.REG.INTENSITY, E.REG.TP_BUTTONS,
+    ]),
+    "readState follows the GUI register order",
+  );
   check(state.clickRatio === 88,
     `release ratio recovered from registers (${state.clickRatio}%)`);
 
